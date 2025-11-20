@@ -3,516 +3,576 @@ import React, { useEffect, useRef, useState } from 'react';
 import { TrainCar } from '../types';
 
 interface TrainDeliveryGameProps {
-  cars: TrainCar[]; // The full train including loco
-  onComplete: () => void; // Called when all cargo is delivered
+  cars: TrainCar[];
+  onComplete: () => void;
 }
 
 // --- CONFIGURATION ---
-const ZOOM_SCALE = 0.5; // Makes everything smaller (Zoom out)
-const SPEED = 2.5; // Slower speed (pixels per frame)
+const ZOOM = 0.5;
+const SPEED = 4; // World units per frame
 const FPS = 60;
-
-// Timing constants (calculated in pixels based on speed)
-// 1 second = 60 frames * 2.5 px = 150 pixels
-const MIN_PLATFORM_DIST = 20 * 150; // 20 seconds
-const MAX_PLATFORM_DIST = 45 * 150; // 45 seconds
+// 1 second = 60 frames * 4 units = 240 units.
+// 20 seconds = 4800 units.
+// 45 seconds = 10800 units.
+const MIN_PLATFORM_DIST = 4800; 
+const MAX_PLATFORM_DIST = 10800;
+const SWITCH_LOOKAHEAD = 1500; // Show arrows when switch is this close
+const TRACK_WIDTH = 60;
 
 type Biome = 'FOREST' | 'DESERT' | 'SNOW';
-type SegmentType = 'NORMAL' | 'SWITCH' | 'PLATFORM';
+type TrackType = 'NORMAL' | 'SWITCH' | 'PLATFORM';
 
 interface TrackPoint {
   x: number;
   y: number;
   angle: number;
+  type: TrackType;
+  width: number;
+  isBranch?: boolean; // If true, this is a visual decoy branch
+  platformSide?: 'LEFT' | 'RIGHT';
+}
+
+interface GameState {
+  // Position (We move upwards, so Y decreases)
+  cameraY: number;
+  
+  // Track Generation
+  points: TrackPoint[];
+  lastGenY: number;
+  lastGenX: number;
+  lastGenAngle: number;
+  
+  // Events
+  nextPlatformY: number;
+  nextSwitchY: number;
+  switchesBeforePlatform: number;
+  switchCount: number;
+  
+  // Logic
+  activeDecision: 'LEFT' | 'RIGHT' | null; // User input
+  lockedDecision: 'LEFT' | 'RIGHT' | null; // Locked when entering switch
+  
+  // Delivery
+  cars: TrainCar[]; // Mutable copy
+  deliveredCount: 0;
+  lastPlatformTime: number;
+  
+  // Visuals
+  biome: Biome;
+  particles: {x: number, y: number, vx: number, vy: number, life: number, color: string}[];
 }
 
 export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onComplete }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
-  // React state for UI overlays (kept minimal for performance)
-  const [cargoLeft, setCargoLeft] = useState<TrainCar[]>(cars.filter(c => c.type !== 'LOCOMOTIVE'));
-  const [msg, setMsg] = useState<string>("LEVERANSEN HAR BÖRJAT!");
-  const [showControls, setShowControls] = useState(false);
-  const [currentBiome, setCurrentBiome] = useState<Biome>('FOREST');
-
-  // Game Loop State (Mutable refs to avoid re-renders)
-  const stateRef = useRef({
-    distance: 0,
-    trackPoints: [] as TrackPoint[],
+  // React State for UI
+  const [showArrows, setShowArrows] = useState(false);
+  const [msg, setMsg] = useState("LEVERANS PÅGÅR...");
+  const [cargoLeft, setCargoLeft] = useState(0);
+  
+  // Game State Ref
+  const state = useRef<GameState>({
+    cameraY: 0,
+    points: [],
+    lastGenY: 0,
+    lastGenX: 0, 
+    lastGenAngle: -Math.PI / 2, // Facing UP
     
-    // Generation Logic
-    nextPlatformAt: 3000, // First platform appears sooner for instant gratification
-    switchesBeforePlatform: 3, 
+    nextPlatformY: -MIN_PLATFORM_DIST,
+    nextSwitchY: -1000, // First switch soon
+    switchesBeforePlatform: 2,
     switchCount: 0,
     
-    targetX: 0, // The X position the track is steering towards
-    currentX: 0, // Current generator X
-    direction: 0, // -1 (Left), 0 (Straight), 1 (Right)
+    activeDecision: null,
+    lockedDecision: null,
     
-    // Switch Logic
-    pendingSwitchDistance: -1, // If > 0, a switch is approaching at this global distance
-    switchDecision: null as 'LEFT' | 'RIGHT' | null,
-
-    // Delivery Logic
-    cars: [...cars], // Local copy for animation
-    isDelivering: false, // Animation flag
+    cars: [],
+    deliveredCount: 0,
+    lastPlatformTime: 0,
+    
+    biome: 'FOREST',
+    particles: []
   });
 
-  // Initialize inputs
-  const handleTurn = (direction: 'LEFT' | 'RIGHT') => {
-    stateRef.current.switchDecision = direction;
-    setShowControls(false); // Hide controls after pick
-    setMsg(direction === 'LEFT' ? "VÄNSTER SPÅR VALT" : "HÖGER SPÅR VALT");
+  // Handle Input
+  const handleTurn = (dir: 'LEFT' | 'RIGHT') => {
+    state.current.activeDecision = dir;
+    // Visual feedback could be added here
   };
 
   useEffect(() => {
+    const s = state.current;
+    s.cars = JSON.parse(JSON.stringify(cars)); // Deep copy
+    s.lastGenX = window.innerWidth; // Start center-ish (in scaled coords, managed in loop)
+    setCargoLeft(s.cars.filter(c => c.type !== 'LOCOMOTIVE').length);
+
     const canvas = canvasRef.current;
     if (!canvas) return;
+    
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Resize handling
-    const updateSize = () => {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-        // Initialize X center
-        if (stateRef.current.distance === 0) {
-            stateRef.current.currentX = canvas.width / 2;
-            stateRef.current.targetX = canvas.width / 2;
-        }
+    let frameId: number;
+
+    // --- HELPER: ADD POINT ---
+    const addPoint = (x: number, y: number, angle: number, type: TrackType = 'NORMAL', extra: Partial<TrackPoint> = {}) => {
+       s.points.push({ x, y, angle, type, width: TRACK_WIDTH, ...extra });
     };
-    updateSize();
-    window.addEventListener('resize', updateSize);
 
-    let animationFrameId: number;
-    
-    // --- GENERATOR FUNCTIONS ---
-
+    // --- GENERATION LOGIC ---
     const generateTrack = () => {
-        const state = stateRef.current;
-        // Maintain a buffer of points ahead of the camera
-        // Camera is at state.distance. We need points up to state.distance + height + buffer
-        const lookAhead = canvas.height / ZOOM_SCALE + 1000;
-        const lastPoint = state.trackPoints[state.trackPoints.length - 1] || { x: canvas.width/2, y: 0, angle: 0 };
+        // Generate ahead of camera
+        // Camera Y goes negative (UP). So we generate if lastGenY > cameraY - 2000
+        // (Since negative numbers: -500 > -2000 is true. We want to generate if lastGenY is NOT far enough ahead)
+        // i.e. lastGenY needs to be MORE negative than cameraY - screenHeight
         
-        while (lastPoint.y < (state.distance + lookAhead)) {
-            const nextY = lastPoint.y + 10; // Granularity
-            
-            // Logic for next event
-            let isSwitch = false;
-            let isPlatform = false;
+        const lookAhead = (canvas.height / ZOOM) + 1000;
+        const targetY = s.cameraY - lookAhead;
 
-            // 1. Check Platform Spawn
-            if (nextY > state.nextPlatformAt && !state.isDelivering) {
-                isPlatform = true;
-                // Reset for next cycle
-                const dist = MIN_PLATFORM_DIST + Math.random() * (MAX_PLATFORM_DIST - MIN_PLATFORM_DIST);
-                state.nextPlatformAt = nextY + dist;
-                state.switchesBeforePlatform = Math.floor(Math.random() * 3) + 2; // 2-4 switches
-                state.switchCount = 0;
+        while (s.lastGenY > targetY) {
+            const step = 20; // Resolution
+            const nextY = s.lastGenY - step;
+            
+            // 1. CHECK SWITCH
+            // We define a "Switch Zone" around nextSwitchY
+            const distToSwitch = Math.abs(s.lastGenY - s.nextSwitchY);
+            
+            if (distToSwitch < step && s.switchCount < s.switchesBeforePlatform) {
+                // START OF SWITCH
+                // Based on lockedDecision (or random), curve Main one way, Branch other way
+                const decision = s.lockedDecision || (Math.random() > 0.5 ? 'LEFT' : 'RIGHT');
+                
+                // Main Track logic updates lastGenX/Angle
+                const turnRate = 0.05;
+                const mainAngle = s.lastGenAngle + (decision === 'LEFT' ? -turnRate : turnRate);
+                
+                const nextX = s.lastGenX + Math.cos(mainAngle) * step;
+                
+                // Add Main Point
+                addPoint(nextX, nextY, mainAngle, 'SWITCH');
+                
+                // Add Decoy Branch Points (Visual only, just one frame of data or a few?)
+                // We just add a "branch" marker to the point, renderer handles drawing the decoy fork
+                s.points[s.points.length-1].isBranch = true;
+                
+                // Update State
+                s.lastGenX = nextX;
+                s.lastGenAngle = mainAngle;
+                s.lastGenY = nextY;
+
+                // Schedule next switch
+                s.switchCount++;
+                // Distribute switches
+                const distRemaining = Math.abs(nextY - s.nextPlatformY);
+                const gap = distRemaining / (s.switchesBeforePlatform - s.switchCount + 1);
+                s.nextSwitchY = nextY - Math.max(1000, gap);
+                
+                // Reset decision
+                s.lockedDecision = null;
+                s.activeDecision = null;
+                continue;
             }
 
-            // 2. Check Switch Spawn
-            // We place switches evenly distributed before the next platform
-            const distToPlatform = state.nextPlatformAt - nextY;
-            if (!isPlatform && distToPlatform > 1000 && state.switchCount < state.switchesBeforePlatform) {
-                // Simple probability check based on space left
-                // Or just periodic:
-                const segmentSize = (state.nextPlatformAt - state.distance) / (state.switchesBeforePlatform + 1);
-                // If we haven't spawned a switch recently...
-                // Simplified: Just random chance if enough space
-                if (Math.random() < 0.005 && !state.pendingSwitchDistance) {
-                    isSwitch = true;
-                    state.switchCount++;
+            // 2. CHECK PLATFORM
+            const distToPlatform = Math.abs(s.lastGenY - s.nextPlatformY);
+            if (distToPlatform < step) {
+                // STRAIGHT SECTION FOR PLATFORM
+                // Force angle upright-ish
+                const targetAngle = -Math.PI/2;
+                s.lastGenAngle = s.lastGenAngle * 0.9 + targetAngle * 0.1;
+                
+                const nextX = s.lastGenX + Math.cos(s.lastGenAngle) * step;
+                addPoint(nextX, nextY, s.lastGenAngle, 'PLATFORM', { platformSide: Math.random() > 0.5 ? 'LEFT' : 'RIGHT' });
+
+                s.lastGenX = nextX;
+                s.lastGenY = nextY;
+
+                // Reset Cycle
+                s.nextPlatformY = nextY - (MIN_PLATFORM_DIST + Math.random() * (MAX_PLATFORM_DIST - MIN_PLATFORM_DIST));
+                s.switchesBeforePlatform = 2 + Math.floor(Math.random() * 3);
+                s.switchCount = 0;
+                // First switch in new cycle
+                const cycleDist = Math.abs(nextY - s.nextPlatformY);
+                s.nextSwitchY = nextY - (cycleDist / (s.switchesBeforePlatform + 1));
+                continue;
+            }
+
+            // 3. NORMAL TRACK
+            // Meandering
+            const noise = Math.sin(nextY * 0.002) + Math.sin(nextY * 0.005) * 0.5;
+            const targetAngle = -Math.PI/2 + (noise * 0.5); // Wander +/- 30 deg
+            
+            // Smoothly steer towards active decision if we are approaching a switch?
+            // If we are approaching a switch (within 1000px), we might want to center or straighten?
+            // Or if user is pressing LEFT, maybe we lean left?
+            // Let's keep it auto-steering mostly, only hard turn at switch.
+            
+            s.lastGenAngle = s.lastGenAngle * 0.95 + targetAngle * 0.05;
+            const nextX = s.lastGenX + Math.cos(s.lastGenAngle) * step;
+            
+            addPoint(nextX, nextY, s.lastGenAngle, 'NORMAL');
+            
+            s.lastGenX = nextX;
+            s.lastGenY = nextY;
+        }
+
+        // Clean up old points
+        const cleanThreshold = s.cameraY + (canvas.height/ZOOM) + 500;
+        s.points = s.points.filter(p => p.y < cleanThreshold);
+    };
+
+    // --- UPDATE LOOP ---
+    const update = () => {
+        // Move Camera
+        s.cameraY -= SPEED;
+
+        // Check Switches Logic (UI)
+        // Find nearest future switch
+        // Since Y is negative, "future" means smaller Y (more negative)
+        // We want s.nextSwitchY < s.cameraY
+        
+        const distToSwitch = Math.abs(s.cameraY - s.nextSwitchY);
+        // Are we approaching it? (nextSwitchY is typically lower/more negative than cameraY)
+        // Wait, s.nextSwitchY is generated ahead.
+        
+        if (distToSwitch < SWITCH_LOOKAHEAD && distToSwitch > 100 && !s.lockedDecision) {
+             if (!showArrows) setShowArrows(true);
+             setMsg("VÄXEL! VÄLJ SPÅR!");
+             
+             // Lock decision if close
+             if (distToSwitch < 200) {
+                 s.lockedDecision = s.activeDecision || (Math.random() > 0.5 ? 'LEFT' : 'RIGHT');
+                 setShowArrows(false);
+                 setMsg(s.lockedDecision === 'LEFT' ? "VÄNSTER SPÅR" : "HÖGER SPÅR");
+             }
+        } else {
+             if (showArrows && distToSwitch > SWITCH_LOOKAHEAD) setShowArrows(false);
+        }
+
+        // Check Platform Delivery
+        // Find platform point near camera (train is roughly at center screen)
+        // Train Y is approx s.cameraY - (canvas.height/2/ZOOM)
+        const trainScreenYOffset = (canvas.height / 2) / ZOOM;
+        const trainY = s.cameraY - trainScreenYOffset;
+        
+        // Check if we passed a platform
+        const passedPlatform = s.points.find(p => p.type === 'PLATFORM' && Math.abs(p.y - trainY) < 20);
+        
+        // Debounce using lastPlatformTime to avoid double delivery for same platform points
+        if (passedPlatform && Date.now() - s.lastPlatformTime > 2000) {
+            // Deliver!
+            if (s.cars.length > 1) { // Always keep Loco
+                // Remove last car
+                const removed = s.cars.pop();
+                setCargoLeft(s.cars.length - 1);
+                s.lastPlatformTime = Date.now();
+                setMsg(`LEVERERAT! ${removed?.type || 'GODS'} AVLASTAD!`);
+                
+                // Spawn Particles
+                for(let i=0; i<10; i++) {
+                    s.particles.push({
+                        x: passedPlatform.x,
+                        y: passedPlatform.y,
+                        vx: (Math.random() - 0.5) * 10,
+                        vy: (Math.random() - 0.5) * 10,
+                        life: 1.0,
+                        color: '#fbbf24'
+                    });
+                }
+
+                // Change Biome occasionally
+                const biomes: Biome[] = ['FOREST', 'DESERT', 'SNOW'];
+                s.biome = biomes[Math.floor(Math.random() * biomes.length)];
+                
+                // WIN CONDITION
+                if (s.cars.length === 1) {
+                    setMsg("ALLT LEVERERAT! TÅGET GÅR HEM...");
+                    setTimeout(onComplete, 3000);
                 }
             }
-
-            // STEERING LOGIC
-            // Smoothly drift towards targetX
-            // Change targetX randomly to create winding track
-            if (Math.random() < 0.01) {
-                const margin = 200;
-                state.targetX = margin + Math.random() * (canvas.width - margin*2);
-            }
-
-            // Apply Switch Decision (Hard steer)
-            if (state.pendingSwitchDistance > 0 && nextY > state.pendingSwitchDistance) {
-                 // We passed the switch point. Apply the curve based on decision
-                 const decision = state.switchDecision || (Math.random() > 0.5 ? 'LEFT' : 'RIGHT');
-                 
-                 // Force a turn
-                 state.targetX = decision === 'LEFT' ? state.currentX - 300 : state.currentX + 300;
-                 state.pendingSwitchDistance = -1; // Reset
-                 state.switchDecision = null;
-            }
-
-            // Move currentX towards targetX
-            const dx = state.targetX - state.currentX;
-            state.currentX += dx * 0.005; // Smooth ease
-            
-            // Special handling: if it's a switch segment, we record it in the point metadata
-            // but the path itself stays continuous (the "chosen" path)
-            
-            // Add point
-            const newPoint = {
-                x: state.currentX,
-                y: nextY,
-                angle: Math.atan2(dx * 0.005, 10),
-                type: isPlatform ? 'PLATFORM' : isSwitch ? 'SWITCH' : 'NORMAL'
-            };
-            
-            // If Switch generated, mark it for UI
-            if (isSwitch) {
-                state.pendingSwitchDistance = nextY;
-            }
-
-            state.trackPoints.push(newPoint as any);
-            
-            // Update ref for loop
-            lastPoint.x = newPoint.x;
-            lastPoint.y = newPoint.y;
         }
 
-        // Prune old points
-        state.trackPoints = state.trackPoints.filter(p => p.y > state.distance - 200);
+        // Update Particles
+        s.particles.forEach(p => {
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life -= 0.02;
+        });
+        s.particles = s.particles.filter(p => p.life > 0);
+
+        generateTrack();
     };
 
-    // --- DRAWING FUNCTIONS ---
+    // --- RENDER LOOP ---
+    const draw = () => {
+        // Resize
+        if (canvas.width !== window.innerWidth) canvas.width = window.innerWidth;
+        if (canvas.height !== window.innerHeight) canvas.height = window.innerHeight;
 
-    const drawScenery = (ctx: CanvasRenderingContext2D) => {
         const w = canvas.width;
         const h = canvas.height;
-        
-        // Background
-        let bg = '#86efac'; // Forest
-        if (currentBiome === 'DESERT') bg = '#fde047';
-        if (currentBiome === 'SNOW') bg = '#f1f5f9';
-        
-        ctx.fillStyle = bg;
+
+        ctx.fillStyle = s.biome === 'SNOW' ? '#f1f5f9' : s.biome === 'DESERT' ? '#fef08a' : '#86efac';
         ctx.fillRect(0, 0, w, h);
 
-        // Decor (Trees/Rocks)
-        // We deterministically draw them based on Y coordinate
-        const startY = Math.floor(stateRef.current.distance / 100) * 100;
-        for (let y = startY; y < startY + (h / ZOOM_SCALE); y += 100) {
-             const seed = Math.sin(y);
-             // Only draw if far from track center (approx)
-             // We don't have exact track X here easily without searching points, 
-             // so we just draw on edges
-             
-             // Left side
-             if (seed > 0.2) {
-                 drawTree(ctx, 100 + seed * 100, y, currentBiome);
-             }
-             // Right side
-             if (seed < -0.2) {
-                 drawTree(ctx, w - 200 + seed * 100, y, currentBiome);
+        ctx.save();
+        
+        // Camera Transform
+        // We want the Train (at cameraY - offset) to be at Screen Center
+        // So we translate everything by -cameraY + offset
+        // Scaling
+        ctx.scale(ZOOM, ZOOM);
+        
+        const screenCenterY = (h / ZOOM) / 2;
+        const ty = -s.cameraY + screenCenterY;
+        
+        ctx.translate(0, ty); // Move world up
+        // Also center X?
+        // We need to follow train X roughly.
+        // Find track point at trainY
+        const trainY = s.cameraY - screenCenterY; // Rough world pos of train? No wait.
+        // World Y increases down. Camera Y decreases (moves up).
+        // Actually we defined cameraY as moving negative.
+        // Let's stick to: Train is at s.cameraY in world space (roughly).
+        // We render s.cameraY at screenCenterY.
+        
+        // Find X at s.cameraY to center camera horizontally
+        const trackAtCam = s.points.find(p => Math.abs(p.y - s.cameraY) < 50) || s.points[s.points.length-1];
+        const tx = trackAtCam ? -trackAtCam.x + (w/ZOOM)/2 : 0;
+        
+        ctx.translate(tx, 0);
+
+        // DRAW SCENERY (Optimized)
+        // Just random trees based on Y
+        const startY = Math.floor((s.cameraY - screenCenterY)/500)*500;
+        const endY = Math.floor((s.cameraY + screenCenterY)/500)*500;
+        
+        for(let y = startY; y > endY - 2000; y-=200) {
+             // Deterministic pseudo-random
+             const seed = Math.sin(y * 0.1);
+             const treeX = seed * 1000; // Spread
+             // Only draw if outside track area
+             if (Math.abs(treeX - (trackAtCam?.x || 0)) > 200) {
+                 drawTree(ctx, trackAtCam?.x + treeX + 400, y, s.biome);
+                 drawTree(ctx, trackAtCam?.x - treeX - 400, y, s.biome);
              }
         }
+
+        // DRAW TRACK
+        // Sleepers
+        ctx.strokeStyle = '#573c29';
+        ctx.lineWidth = 40;
+        ctx.lineCap = 'butt';
+        ctx.setLineDash([10, 20]);
+        ctx.beginPath();
+        s.points.forEach((p, i) => {
+           if (i===0) ctx.moveTo(p.x, p.y);
+           else ctx.lineTo(p.x, p.y);
+           
+           // Draw Branch Decoy
+           if (p.isBranch) {
+               // Visual fork
+               const branchAngle = p.angle + (Math.random() > 0.5 ? 0.5 : -0.5);
+               const bx = p.x + Math.cos(branchAngle) * 200;
+               const by = p.y + Math.sin(branchAngle) * 200;
+               ctx.moveTo(p.x, p.y);
+               ctx.lineTo(bx, by);
+           }
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Rails
+        ctx.strokeStyle = '#cbd5e1';
+        ctx.lineWidth = 4;
+        [-12, 12].forEach(offset => {
+            ctx.beginPath();
+            s.points.forEach((p, i) => {
+                const ox = Math.cos(p.angle) * offset; // Rough offset perpendicular? No this is simple offset
+                // Correct perpendicular offset
+                const perp = p.angle + Math.PI/2;
+                const dx = Math.cos(perp) * offset;
+                const dy = Math.sin(perp) * offset;
+                
+                if (i===0) ctx.moveTo(p.x + dx, p.y + dy);
+                else ctx.lineTo(p.x + dx, p.y + dy);
+            });
+            ctx.stroke();
+        });
+
+        // DRAW PLATFORMS
+        s.points.forEach(p => {
+            if (p.type === 'PLATFORM') {
+                const side = p.platformSide === 'LEFT' ? -1 : 1;
+                const px = p.x + (side * 80);
+                
+                ctx.fillStyle = '#9ca3af'; // concrete
+                ctx.fillRect(px - 20, p.y - 100, 40, 200);
+                
+                // Roof
+                ctx.fillStyle = '#ef4444';
+                ctx.beginPath();
+                ctx.moveTo(px - 25, p.y - 110);
+                ctx.lineTo(px + 25, p.y - 110);
+                ctx.lineTo(px + 25, p.y + 110);
+                ctx.lineTo(px - 25, p.y + 110);
+                ctx.fill();
+                
+                // Goods on platform
+                if (p.y > s.cameraY) { // If future/past? 
+                    // Just static goods
+                    ctx.fillStyle = '#fbbf24';
+                    ctx.fillRect(px - 10, p.y - 10, 20, 20);
+                }
+            }
+        });
+
+        // DRAW TRAIN
+        // Train follows track at s.cameraY
+        // We iterate cars and place them at s.cameraY + offset along track
+        // We need to trace back along points
+        let currentTrackIndex = s.points.findIndex(p => p.y <= s.cameraY);
+        if (currentTrackIndex === -1) currentTrackIndex = 0;
+        
+        let distAccumulator = 0;
+        let carIndex = 0;
+        
+        // We traverse points backwards (increasing Y) from camera
+        for (let i = currentTrackIndex; i < s.points.length; i++) {
+             if (carIndex >= s.cars.length) break;
+             
+             const p1 = s.points[i];
+             const p2 = s.points[i+1];
+             if (!p2) break;
+             
+             const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+             distAccumulator += segLen;
+             
+             const carSpacing = 60; // Space between cars
+             
+             if (distAccumulator > (carIndex * carSpacing) + 20) { // Offset start
+                 drawCar(ctx, s.cars[carIndex], p1.x, p1.y, p1.angle);
+                 carIndex++;
+             }
+        }
+
+        // DRAW PARTICLES
+        s.particles.forEach(p => {
+            ctx.fillStyle = p.color;
+            ctx.globalAlpha = p.life;
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 10, 0, Math.PI*2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        });
+
+        ctx.restore();
     };
 
     const drawTree = (ctx: CanvasRenderingContext2D, x: number, y: number, biome: Biome) => {
-        // Adjust to screen space
-        const screenY = (y - stateRef.current.distance);
-        if (screenY < -100 || screenY > canvas.height / ZOOM_SCALE) return;
-
         ctx.save();
-        ctx.translate(x, screenY);
-        
+        ctx.translate(x, y);
         if (biome === 'FOREST') {
-             ctx.fillStyle = '#166534';
-             ctx.beginPath();
-             ctx.moveTo(0, -30);
-             ctx.lineTo(15, 0);
-             ctx.lineTo(-15, 0);
-             ctx.fill();
+            ctx.fillStyle = '#14532d';
+            ctx.beginPath();
+            ctx.arc(0, 0, 40, 0, Math.PI*2);
+            ctx.fill();
+            ctx.fillStyle = '#166534';
+            ctx.beginPath();
+            ctx.arc(0, -20, 30, 0, Math.PI*2);
+            ctx.fill();
         } else if (biome === 'DESERT') {
+             // Cactus
              ctx.fillStyle = '#65a30d';
-             ctx.fillRect(-5, -25, 10, 25);
-             ctx.fillRect(5, -15, 5, 5);
+             ctx.fillRect(-10, -40, 20, 40);
+             ctx.fillRect(10, -30, 10, 10);
+             ctx.fillRect(-20, -20, 10, 10);
         } else {
-             ctx.fillStyle = '#cbd5e1';
+             // Pine
+             ctx.fillStyle = '#334155';
              ctx.beginPath();
-             ctx.moveTo(0, -30);
-             ctx.lineTo(15, 0);
-             ctx.lineTo(-15, 0);
+             ctx.moveTo(0, -60);
+             ctx.lineTo(20, 0);
+             ctx.lineTo(-20, 0);
              ctx.fill();
         }
         ctx.restore();
     };
 
-    const render = () => {
-        const state = stateRef.current;
-        
-        // 1. UPDATE
-        if (cargoLeft.length > 0) {
-             state.distance += SPEED;
-        } else {
-             // Stop slowly
-             // state.distance += 0; 
-        }
-        
-        generateTrack();
-
-        // Check for Switch UI trigger
-        // If a switch is coming up in X pixels
-        const switchPoint = state.trackPoints.find(p => (p as any).type === 'SWITCH' && p.y > state.distance);
-        if (switchPoint) {
-             const dist = switchPoint.y - state.distance;
-             if (dist < 800 && dist > 0) {
-                 if (!showControls && !state.switchDecision) {
-                     setShowControls(true);
-                     setMsg("VÄXEL FRAMFÖR DIG! VÄLJ SPÅR!");
-                 }
-             } else {
-                if (showControls) setShowControls(false);
-             }
-        }
-
-        // Check for Platform Delivery Trigger
-        const platformPoint = state.trackPoints.find(p => (p as any).type === 'PLATFORM' && p.y < state.distance + 100 && p.y > state.distance - 100);
-        if (platformPoint && !state.isDelivering && state.cars.length > 1) {
-             // Trigger delivery
-             state.isDelivering = true;
-             
-             // Animate in React
-             setTimeout(() => {
-                 // Visual pop
-                 const newCars = [...state.cars];
-                 newCars.pop(); // Remove cargo
-                 state.cars = newCars;
-                 setCargoLeft(prev => prev.slice(0, -1)); // Update UI
-                 setMsg("LEVERANS KLAR! BRA JOBBAT!");
-                 state.isDelivering = false;
-                 
-                 // Change Biome
-                 const biomes: Biome[] = ['FOREST', 'DESERT', 'SNOW'];
-                 setCurrentBiome(biomes[Math.floor(Math.random() * biomes.length)]);
-
-                 // CHECK WIN
-                 if (newCars.length === 1) {
-                     // Only loco left
-                     setTimeout(onComplete, 2000);
-                 }
-             }, 500);
-        }
-
-        // 2. DRAW
-        // Apply Zoom
+    const drawCar = (ctx: CanvasRenderingContext2D, car: TrainCar, x: number, y: number, angle: number) => {
         ctx.save();
-        ctx.scale(ZOOM_SCALE, ZOOM_SCALE);
+        ctx.translate(x, y);
+        ctx.rotate(angle + Math.PI/2); // Adjust angle
         
-        // Draw World
-        drawScenery(ctx);
-
-        // Draw Tracks (Sleeper Layer)
-        ctx.lineWidth = 24;
-        ctx.strokeStyle = '#78350f'; // Wood
-        ctx.lineCap = 'butt';
-        ctx.beginPath();
-        // Optimization: Draw segmented lines
-        // We draw continuously through points
-        let started = false;
-        for (const p of state.trackPoints) {
-            const screenY = p.y - state.distance;
-            if (screenY > canvas.height/ZOOM_SCALE + 100) break;
-            if (!started) { ctx.moveTo(p.x, screenY); started = true; }
-            else ctx.lineTo(p.x, screenY);
-            
-            // Draw manual sleepers occasionally? 
-            // dashed line trick is faster
-        }
-        ctx.setLineDash([10, 15]); // Sleepers
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Draw Rails (Steel Layer)
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = '#94a3b8'; // Steel
-        // Left Rail
-        ctx.beginPath();
-        started = false;
-        for (const p of state.trackPoints) {
-            const screenY = p.y - state.distance;
-            if (screenY > canvas.height/ZOOM_SCALE + 100) break;
-            const ox = Math.cos(p.angle) * 8; // Offset
-            if (!started) { ctx.moveTo(p.x - 8, screenY); started = true; }
-            else ctx.lineTo(p.x - 8, screenY);
-        }
-        ctx.stroke();
-        // Right Rail
-        ctx.beginPath();
-        started = false;
-        for (const p of state.trackPoints) {
-            const screenY = p.y - state.distance;
-            if (screenY > canvas.height/ZOOM_SCALE + 100) break;
-            if (!started) { ctx.moveTo(p.x + 8, screenY); started = true; }
-            else ctx.lineTo(p.x + 8, screenY);
-        }
-        ctx.stroke();
-
-        // Draw Switches (Visual only)
-        state.trackPoints.forEach(p => {
-             if ((p as any).type === 'SWITCH') {
-                 const screenY = p.y - state.distance;
-                 if (screenY > -100 && screenY < canvas.height/ZOOM_SCALE) {
-                     // Draw a fake branching track
-                     ctx.save();
-                     ctx.translate(p.x, screenY);
-                     ctx.strokeStyle = '#94a3b8';
-                     ctx.lineWidth = 4;
-                     ctx.beginPath();
-                     ctx.moveTo(0,0);
-                     // Draw a Y split
-                     ctx.quadraticCurveTo(-20, -50, -40, -100);
-                     ctx.moveTo(0,0);
-                     ctx.quadraticCurveTo(20, -50, 40, -100);
-                     ctx.stroke();
-                     ctx.restore();
-                 }
-             }
-        });
-
-        // Draw Platforms
-        state.trackPoints.forEach(p => {
-             if ((p as any).type === 'PLATFORM') {
-                 const screenY = p.y - state.distance;
-                 if (screenY > -200 && screenY < canvas.height/ZOOM_SCALE) {
-                     ctx.save();
-                     ctx.translate(p.x + 40, screenY); // Right side of track
-                     
-                     // Platform Base
-                     ctx.fillStyle = '#9ca3af';
-                     ctx.fillRect(0, -100, 40, 200);
-                     // Roof
-                     ctx.fillStyle = '#ef4444';
-                     ctx.beginPath();
-                     ctx.moveTo(-5, -110);
-                     ctx.lineTo(45, -110);
-                     ctx.lineTo(45, 110);
-                     ctx.lineTo(-5, 110);
-                     ctx.fill();
-                     
-                     // Decor
-                     ctx.fillStyle = '#fff';
-                     ctx.font = 'bold 20px Arial';
-                     ctx.fillText("STATION", -40, -120);
-                     
-                     ctx.restore();
-                 }
-             }
-        });
-
-        // 3. DRAW TRAIN
-        // Train position is fixed on screen Y (bottom third), X follows the track at that Y
-        // We interpolate X from trackPoints
-        const trainScreenY = (canvas.height / ZOOM_SCALE) - 200;
-        const trainWorldY = state.distance + trainScreenY;
+        const w = 30;
+        const h = 50;
         
-        // Find track point at trainWorldY
-        const currentPoint = state.trackPoints.find(p => p.y >= trainWorldY) || state.trackPoints[0];
+        // Shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.fillRect(-w/2 + 5, -h/2 + 5, w, h);
         
-        if (currentPoint) {
-            ctx.save();
-            ctx.translate(currentPoint.x, trainScreenY);
-            ctx.rotate(-currentPoint.angle); // Rotate to match track
-            
-            drawTrain(ctx, state.cars);
-            ctx.restore();
-        }
-
-        ctx.restore(); // End Zoom
-        animationFrameId = requestAnimationFrame(render);
+        // Body
+        ctx.fillStyle = car.type === 'LOCOMOTIVE' ? '#e11d48' : car.color;
+        if (car.type === 'COAL') ctx.fillStyle = '#1f2937';
+        
+        ctx.beginPath();
+        ctx.roundRect(-w/2, -h/2, w, h, 4);
+        ctx.fill();
+        
+        // Detail
+        ctx.fillStyle = 'rgba(255,255,255,0.3)';
+        ctx.fillRect(-w/2+4, -h/2+4, w-8, h/3);
+        
+        ctx.restore();
     };
 
-    const drawTrain = (ctx: CanvasRenderingContext2D, trainCars: TrainCar[]) => {
-        const carWidth = 26; // Smaller cars
-        const carLength = 40;
-        const gap = 5;
-
-        // Draw backwards from Loco
-        trainCars.forEach((car, index) => {
-            const yOffset = index * (carLength + gap);
-            
-            ctx.save();
-            ctx.translate(0, yOffset); // Draw down
-            
-            // Shadow
-            ctx.fillStyle = 'rgba(0,0,0,0.3)';
-            ctx.fillRect(-carWidth/2 + 2, 2, carWidth, carLength);
-
-            // Body
-            ctx.fillStyle = car.type === 'LOCOMOTIVE' ? '#e11d48' : car.color;
-            if (car.type === 'COAL') ctx.fillStyle = '#1f2937';
-
-            ctx.beginPath();
-            ctx.roundRect(-carWidth/2, 0, carWidth, carLength, 4);
-            ctx.fill();
-
-            // Details
-            if (car.type === 'LOCOMOTIVE') {
-                ctx.fillStyle = '#fbbf24'; // Light
-                ctx.fillRect(-5, 2, 10, 5);
-                
-                // Smoke puff
-                if (Math.floor(Date.now() / 100) % 3 === 0) {
-                   ctx.fillStyle = 'rgba(255,255,255,0.6)';
-                   ctx.beginPath();
-                   ctx.arc(0, -15, 8, 0, Math.PI*2);
-                   ctx.fill();
-                }
-            } else {
-                // Cargo box look
-                ctx.fillStyle = 'rgba(255,255,255,0.3)';
-                ctx.fillRect(-carWidth/2+4, 4, carWidth-8, carLength-8);
-            }
-
-            ctx.restore();
-        });
+    // Loop
+    const tick = () => {
+       update();
+       draw();
+       frameId = requestAnimationFrame(tick);
     };
+    tick();
 
-    render();
-
-    return () => cancelAnimationFrame(animationFrameId);
-  }, [cars, onComplete]); // Re-run only if critical props change
+    return () => {
+        cancelAnimationFrame(frameId);
+    };
+  }, [cars]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900 flex flex-col items-center justify-center">
-       <div className="relative w-full h-full bg-black overflow-hidden">
-          <canvas 
-            ref={canvasRef} 
-            className="w-full h-full object-cover"
-          />
-          
-          {/* HUD */}
-          <div className="absolute top-4 left-0 right-0 flex justify-center pointer-events-none">
-             <div className="bg-slate-900/80 text-white px-8 py-3 rounded-full border-2 border-slate-500 font-bold text-xl animate-pulse shadow-xl">
-                {msg}
-             </div>
-          </div>
-
-          <div className="absolute top-4 right-4 bg-blue-600 text-white p-3 rounded-xl font-black shadow-lg border-4 border-blue-400 text-sm md:text-xl">
-             📦 GODS KVAR: {cargoLeft.length}
-          </div>
-
-          {/* SWITCH CONTROLS */}
-          {showControls && (
-             <div className="absolute bottom-10 left-0 right-0 flex justify-center gap-8 px-4 animate-bounce-in">
-                 <button 
-                    onClick={() => handleTurn('LEFT')}
-                    className="bg-yellow-400 hover:bg-yellow-300 text-yellow-900 border-b-8 border-yellow-600 active:border-b-0 active:translate-y-2 rounded-2xl w-32 h-32 flex items-center justify-center shadow-2xl transition-all"
-                 >
-                    <span className="text-6xl">⬅</span>
-                 </button>
-                 <button 
-                    onClick={() => handleTurn('RIGHT')}
-                    className="bg-yellow-400 hover:bg-yellow-300 text-yellow-900 border-b-8 border-yellow-600 active:border-b-0 active:translate-y-2 rounded-2xl w-32 h-32 flex items-center justify-center shadow-2xl transition-all"
-                 >
-                    <span className="text-6xl">➡</span>
-                 </button>
-             </div>
-          )}
+    <div className="fixed inset-0 z-50 bg-slate-900 text-white font-bold">
+       <canvas ref={canvasRef} className="w-full h-full block" />
+       
+       {/* UI OVERLAY */}
+       <div className="absolute top-4 left-0 right-0 flex justify-center pointer-events-none">
+           <div className="bg-slate-800/80 backdrop-blur px-6 py-2 rounded-full border-2 border-slate-600 shadow-xl text-xl text-yellow-400">
+              {msg}
+           </div>
        </div>
+       
+       <div className="absolute top-4 right-4 pointer-events-none">
+           <div className="bg-blue-600 px-4 py-2 rounded-xl border-4 border-blue-400 shadow-lg flex flex-col items-center">
+              <span className="text-xs text-blue-200 uppercase">Gods kvar</span>
+              <span className="text-3xl">{cargoLeft}</span>
+           </div>
+       </div>
+
+       {showArrows && (
+           <div className="absolute bottom-10 left-0 right-0 flex justify-between px-10 md:px-32 pointer-events-auto animate-pulse">
+              <button 
+                 onPointerDown={() => handleTurn('LEFT')}
+                 className="w-32 h-32 bg-yellow-400 rounded-full border-b-8 border-yellow-600 active:border-b-0 active:translate-y-2 shadow-2xl flex items-center justify-center text-6xl text-yellow-900 hover:bg-yellow-300 transition-colors"
+              >
+                 ⬅
+              </button>
+              <button 
+                 onPointerDown={() => handleTurn('RIGHT')}
+                 className="w-32 h-32 bg-yellow-400 rounded-full border-b-8 border-yellow-600 active:border-b-0 active:translate-y-2 shadow-2xl flex items-center justify-center text-6xl text-yellow-900 hover:bg-yellow-300 transition-colors"
+              >
+                 ➡
+              </button>
+           </div>
+       )}
     </div>
   );
 };
