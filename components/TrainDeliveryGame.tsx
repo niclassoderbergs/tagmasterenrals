@@ -69,11 +69,13 @@ const WAGON_CONFIG: Record<WagonType, {
   }
 };
 
-const MAX_SLOTS = 5; // Increased slightly to allow for big scores
-
-export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete }) => {
+export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onComplete }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   
+  // Determine capacity based on collected cars (excluding locomotive)
+  // Ensure at least 1 slot if something goes weird, though app logic prevents it.
+  const maxSlots = Math.max(1, cars.filter(c => c.type !== 'LOCOMOTIVE').length);
+
   // STATE
   const [phase, setPhase] = useState<'BUILD' | 'MISSION_INTRO' | 'DRIVE' | 'SUMMARY'>('BUILD');
   const [selectedWagons, setSelectedWagons] = useState<WagonType[]>([]);
@@ -106,7 +108,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
   // --- BUILD PHASE LOGIC ---
 
   const addWagon = (type: WagonType) => {
-    if (selectedWagons.length < MAX_SLOTS) {
+    if (selectedWagons.length < maxSlots) {
       setSelectedWagons([...selectedWagons, type]);
     }
   };
@@ -122,7 +124,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
     const count = selectedWagons.length;
     let text = "";
     if (count <= 2) text = "En kort och säker tur till grannbyn.";
-    else if (count <= 4) text = "En rejäl leverans! Se upp i backarna.";
+    else if (count <= 5) text = "En rejäl leverans! Se upp i backarna.";
     else text = "Ett jättelångt tåg! Här gäller det att vara modig.";
     
     setMissionText(text);
@@ -130,10 +132,16 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
   };
 
   const startDrive = () => {
-    // Dynamic Track Length: More wagons = Longer track
-    const baseDistance = 3000;
-    const distancePerWagon = 1500;
-    const totalDist = baseDistance + (selectedWagons.length * distancePerWagon);
+    // Dynamic Track Length: 
+    // Requirement: 5 wagons ~ 60s. 10 wagons ~ 120s.
+    // Speed logic: 
+    // Physics speed ~30 (on display) -> 30 * 20 (pixels/sec factor) = 600 units/sec.
+    // 60 seconds * 600 = 36000 units.
+    // Per wagon = 36000 / 5 = 7200 units.
+    
+    const distancePerWagon = 7200;
+    // Ensure a minimum track length for fun even with 1 wagon
+    const totalDist = Math.max(7200, selectedWagons.length * distancePerWagon);
 
     let totalWeight = 2.0; // Loco weight
     const gameWagons = selectedWagons.map((t, i) => {
@@ -145,9 +153,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
         cargoOffset: { x: 0, y: 0 }
       };
     });
-
-    // Reverse order for logic since we are "backing" (Wagons are pushed/pulled to the Left)
-    // Actually physics doesn't care about order much, but visual rendering does.
 
     engine.current = {
       ...engine.current,
@@ -175,14 +180,16 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
     const healthPercent = W > 0 ? (healthSum / W) / 100 : 0; // 0.0 to 1.0
 
     // Time Bonus logic
-    // Estimate time: Distance / AvgSpeed (let's say 15 is a good speed)
+    // Estimate time: Distance / AvgSpeed
     // If they drive constantly at top speed (~30), they are fast.
     const durationSec = (Date.now() - startTime) / 1000;
-    const targetSec = engine.current.totalDistance / 12; // Somewhat lenient target
+    // Target speed approx 28 (slightly less than max 35-40)
+    // 28 * 20 = 560 units/sec
+    const targetSec = engine.current.totalDistance / 560; 
     
     let S = 0; // Speed factor 0 to 1
     if (durationSec < targetSec) S = 1; // Fast
-    else if (durationSec < targetSec * 1.5) S = 0.5; // Okay
+    else if (durationSec < targetSec * 1.4) S = 0.5; // Okay
     else S = 0.1; // Slow but finished
 
     // FORMULA: W * (50 + 50*F) + 50*S
@@ -195,8 +202,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
 
     // Stars calculation
     // Max possible score approx: W*100 + 50.
-    // For 5 wagons: 550 max.
-    // For 1 wagon: 150 max.
     const maxPossible = (W * 100) + 50;
     const ratio = total / maxPossible;
     
@@ -405,6 +410,9 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
          const wagonScreenX = LOCO_SCREEN_X - 140 - (i * gap);
          const wagonWorldX = state.distance - 140 - (i * 130); // Physics pos
          
+         // Only draw if on screen
+         if (wagonScreenX < -150 || wagonScreenX > W + 150) return;
+
          const slope = getSlope(wagonWorldX);
          const y = H - getTerrainY(wagonWorldX);
          
@@ -465,8 +473,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
             }
          });
          
-         // Update particle origins if needed (simplification: just spawn near screen)
-         // Not strictly mapped here but handled in physics loop update
       });
 
       // DRAW LOCO (Right side)
@@ -555,60 +561,63 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
               <div className="bg-white p-4 rounded-2xl shadow-xl border-b-8 border-slate-200 relative max-w-xs">
                   <div className="absolute -bottom-4 left-8 md:left-1/2 w-6 h-6 bg-white rotate-45 border-r-8 border-b-8 border-slate-200"></div>
                   <p className="font-bold text-slate-800 text-sm md:text-base uppercase">
-                     "Jag orkar dra {MAX_SLOTS} vagnar! Ju fler du tar, desto mer <span className="text-yellow-600">guld</span> kan vi tjäna!"
+                     "Jag orkar dra {maxSlots} vagnar! Ju fler du tar, desto mer <span className="text-yellow-600">guld</span> kan vi tjäna!"
                   </p>
               </div>
           </div>
 
           {/* TRAIN PREVIEW (Reversed Order: Wagons -> Loco) */}
-          <div className="flex items-end justify-center w-full max-w-6xl mx-auto px-4 relative z-10 mb-10 md:mb-20 gap-1">
-             
-             {/* 1. SLOTS (Left Side) */}
-             {Array.from({length: MAX_SLOTS}).map((_, i) => {
-                const type = selectedWagons[i];
-                return (
-                  <div key={i} className="w-24 h-24 md:w-32 md:h-32 relative flex items-end justify-center">
-                     {type ? (
-                       <div 
-                         className="w-full h-24 md:h-32 rounded-lg shadow-xl border-4 border-white relative hover:scale-105 transition-transform cursor-pointer animate-bounce-in"
-                         style={{backgroundColor: WAGON_CONFIG[type].color}}
-                         onClick={() => removeWagon(i)}
-                       >
-                          <div className="absolute inset-0 flex items-center justify-center text-5xl md:text-6xl drop-shadow-md">
-                            {WAGON_CONFIG[type].icon}
+          {/* Added overflow-x-auto to container to handle long trains */}
+          <div className="w-full overflow-x-auto pb-8 pt-4 no-scrollbar">
+             <div className="flex items-end justify-center min-w-max px-8 mx-auto gap-1 relative z-10 mb-10">
+                
+                {/* 1. SLOTS (Left Side) */}
+                {Array.from({length: maxSlots}).map((_, i) => {
+                   const type = selectedWagons[i];
+                   return (
+                     <div key={i} className="w-24 h-24 md:w-32 md:h-32 relative flex items-end justify-center">
+                        {type ? (
+                          <div 
+                            className="w-full h-24 md:h-32 rounded-lg shadow-xl border-4 border-white relative hover:scale-105 transition-transform cursor-pointer animate-bounce-in"
+                            style={{backgroundColor: WAGON_CONFIG[type].color}}
+                            onClick={() => removeWagon(i)}
+                          >
+                             <div className="absolute inset-0 flex items-center justify-center text-5xl md:text-6xl drop-shadow-md">
+                               {WAGON_CONFIG[type].icon}
+                             </div>
+                             <div className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold border-2 border-white shadow-sm">✕</div>
                           </div>
-                          <div className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center text-xs font-bold border-2 border-white shadow-sm">✕</div>
-                       </div>
-                     ) : (
-                       <div className="w-full h-20 md:h-24 bg-black/10 border-4 border-dashed border-slate-400/50 rounded-xl flex items-center justify-center text-slate-400 font-bold text-xs md:text-sm uppercase">
-                          PLATS {i+1}
-                       </div>
-                     )}
-                     {/* Connector */}
-                     <div className="absolute right-[-6px] bottom-4 w-4 h-2 bg-slate-700"></div>
-                  </div>
-                );
-             })}
+                        ) : (
+                          <div className="w-full h-20 md:h-24 bg-black/10 border-4 border-dashed border-slate-400/50 rounded-xl flex items-center justify-center text-slate-400 font-bold text-xs md:text-sm uppercase">
+                             PLATS {i+1}
+                          </div>
+                        )}
+                        {/* Connector */}
+                        <div className="absolute right-[-6px] bottom-4 w-4 h-2 bg-slate-700"></div>
+                     </div>
+                   );
+                })}
 
-             {/* 2. LOKET (Right Side) */}
-             <div className="relative w-32 h-32 md:w-40 md:h-40 flex-shrink-0 transform scale-x-[-1]"> 
-                {/* Flipped visually to face Left, but placed on Right */}
-                <div className="absolute bottom-2 right-0 w-full h-3/4 bg-red-600 rounded-l-xl shadow-xl border-4 border-red-800 z-20"></div>
-                <div className="absolute bottom-2 right-0 w-1/2 h-full bg-slate-800 rounded-t-lg z-10"></div>
-                <div className="absolute bottom-2 left-0 w-10 h-10 bg-slate-900 skew-x-12"></div> 
-             </div>
-             
-             {/* START BUTTON */}
-             {selectedWagons.length > 0 && (
-                <div className="absolute -top-32 left-1/2 transform -translate-x-1/2 animate-bounce">
-                   <button 
-                     onClick={finalizeBuild}
-                     className="bg-green-500 hover:bg-green-600 text-white text-2xl md:text-4xl font-black py-4 px-12 rounded-full shadow-2xl border-b-8 border-green-700 active:border-b-0 active:translate-y-2 uppercase tracking-widest whitespace-nowrap"
-                   >
-                     KÖR TÅGET! ▶
-                   </button>
+                {/* 2. LOKET (Right Side) */}
+                <div className="relative w-32 h-32 md:w-40 md:h-40 flex-shrink-0 transform scale-x-[-1]"> 
+                   {/* Flipped visually to face Left, but placed on Right */}
+                   <div className="absolute bottom-2 right-0 w-full h-3/4 bg-red-600 rounded-l-xl shadow-xl border-4 border-red-800 z-20"></div>
+                   <div className="absolute bottom-2 right-0 w-1/2 h-full bg-slate-800 rounded-t-lg z-10"></div>
+                   <div className="absolute bottom-2 left-0 w-10 h-10 bg-slate-900 skew-x-12"></div> 
                 </div>
-             )}
+                
+                {/* START BUTTON */}
+                {selectedWagons.length > 0 && (
+                   <div className="absolute -top-32 left-1/2 transform -translate-x-1/2 animate-bounce z-50">
+                      <button 
+                        onClick={finalizeBuild}
+                        className="bg-green-500 hover:bg-green-600 text-white text-2xl md:text-4xl font-black py-4 px-12 rounded-full shadow-2xl border-b-8 border-green-700 active:border-b-0 active:translate-y-2 uppercase tracking-widest whitespace-nowrap"
+                      >
+                        KÖR TÅGET! ▶
+                      </button>
+                   </div>
+                )}
+             </div>
           </div>
         </div>
 
@@ -618,7 +627,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
                 <button 
                    key={t}
                    onClick={() => addWagon(t)}
-                   disabled={selectedWagons.length >= MAX_SLOTS}
+                   disabled={selectedWagons.length >= maxSlots}
                    className="group relative flex flex-col items-center bg-slate-50 p-2 md:p-4 rounded-xl border-2 border-slate-200 hover:border-blue-400 hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed active:scale-95 transition-all"
                 >
                    <div className="text-4xl md:text-5xl mb-2 group-hover:scale-110 transition-transform">{WAGON_CONFIG[t].icon}</div>
