@@ -36,10 +36,17 @@ export interface TrainCar {
   color: string;
 }
 
+export interface Medal {
+  id: string;
+  date: string;
+  type: 'GOLD' | 'SILVER' | 'BRONZE';
+}
+
 export interface GameState {
   score: number;
   cars: TrainCar[];
   currentStreak: number;
+  medals: Medal[];
 }
 
 export interface FirebaseConfig {

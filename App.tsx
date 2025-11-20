@@ -1,9 +1,10 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Subject, Question, TrainCar, GameState, AppSettings, QuestionType } from './types';
+import { Subject, Question, TrainCar, GameState, AppSettings, QuestionType, Medal } from './types';
 import { generateQuestion, generateRewardImage, playTextAsSpeech, markQuestionTooHard, removeBadImage } from './services/geminiService';
 import { trainDb } from './services/db';
 import { TrainViz } from './components/TrainViz';
+import { TrainDeliveryGame } from './components/TrainDeliveryGame'; // Import game
 import { Conductor } from './components/Conductor';
 import { SettingsModal } from './components/SettingsModal';
 import { DragDropChallenge } from './components/DragDropChallenge';
@@ -59,6 +60,7 @@ const INITIAL_GAME_STATE: GameState = {
   score: 0,
   cars: [{ id: 'loco', type: 'LOCOMOTIVE', color: 'red' }], // Start with just the engine
   currentStreak: 0,
+  medals: []
 };
 
 // Helper for level labels
@@ -100,7 +102,10 @@ export default function App() {
       const saved = localStorage.getItem('trainMasterState');
       if (saved) {
         try {
-          return JSON.parse(saved);
+          const parsed = JSON.parse(saved);
+          // Migration for old state without medals
+          if (!parsed.medals) parsed.medals = [];
+          return parsed;
         } catch (e) {
           console.error("Failed to parse saved game state");
         }
@@ -153,6 +158,11 @@ export default function App() {
   
   // Audio State
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+
+  // Delivery Game State
+  const [showDeliveryPrompt, setShowDeliveryPrompt] = useState(false);
+  const [isPlayingDelivery, setIsPlayingDelivery] = useState(false);
+  const [showMedalCelebration, setShowMedalCelebration] = useState(false);
 
   // Determine if we are in active gameplay to condense the UI
   const isMissionActive = !!selectedSubject;
@@ -517,19 +527,55 @@ export default function App() {
          color: CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)]
        };
        
+       const updatedCars = [...gameState.cars, newCar];
+       const newScore = gameState.score + 100;
+
        setGameState(prev => ({
          ...prev,
-         score: prev.score + 100,
-         cars: [...prev.cars, newCar],
+         score: newScore,
+         cars: updatedCars,
          currentStreak: prev.currentStreak + 1
        }));
 
        // Go back to menu
        setSelectedSubject(null);
        setQuestionBuffer([]); // Clear buffer to save memory
+       
+       // Check if we have enough cars to trigger delivery mode?
+       // We only trigger if we have 5+ cars (excluding locomotive)
+       const cargoCars = updatedCars.filter(c => c.type !== 'LOCOMOTIVE').length;
+       
+       if (cargoCars > 0 && cargoCars % 5 === 0) {
+           setTimeout(() => setShowDeliveryPrompt(true), 500);
+       }
+
     } else {
       loadNextQuestion(selectedSubject);
     }
+  };
+
+  const handleStartDelivery = () => {
+      setShowDeliveryPrompt(false);
+      setIsPlayingDelivery(true);
+  };
+
+  const handleDeliveryComplete = () => {
+      setIsPlayingDelivery(false);
+      
+      // Reset train to just locomotive
+      const newMedal: Medal = {
+          id: crypto.randomUUID(),
+          date: new Date().toISOString(),
+          type: 'GOLD'
+      };
+      
+      setGameState(prev => ({
+          ...prev,
+          cars: [{ id: 'loco', type: 'LOCOMOTIVE', color: 'red' }],
+          medals: [...(prev.medals || []), newMedal]
+      }));
+
+      setShowMedalCelebration(true);
   };
 
   const handleReportBadImage = () => {
@@ -543,8 +589,16 @@ export default function App() {
   return (
     <Layout settings={settings} setSettings={setSettings} showSettings={showSettings} setShowSettings={setShowSettings}>
       
+      {/* DELIVERY GAME OVERLAY */}
+      {isPlayingDelivery && (
+          <TrainDeliveryGame 
+             cars={gameState.cars} 
+             onComplete={handleDeliveryComplete} 
+          />
+      )}
+
       {/* STICKY HEADER & MOBILE TRAIN GROUP */}
-      <div className="sticky top-0 z-50 w-full shadow-lg">
+      <div className="sticky top-0 z-40 w-full shadow-lg">
         
         {/* Header */}
         <header className={`bg-blue-600 transition-all duration-300 ${isMissionActive ? 'py-1 px-2' : 'p-4'}`}>
@@ -563,6 +617,9 @@ export default function App() {
                      <>
                        <span>|</span>
                        <span>POÄNG: {gameState.score}</span>
+                       {(gameState.medals?.length || 0) > 0 && (
+                           <span className="text-yellow-300">| 🏅 {gameState.medals.length}</span>
+                       )}
                      </>
                    )}
                  </div>
@@ -590,6 +647,55 @@ export default function App() {
 
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
 
+      {/* MODALS */}
+      
+      {/* Delivery Prompt Modal */}
+      {showDeliveryPrompt && (
+          <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 animate-fade-in">
+              <div className="bg-white rounded-3xl p-8 max-w-lg w-full text-center border-8 border-yellow-400 shadow-2xl relative overflow-hidden">
+                  <div className="absolute top-0 left-0 w-full h-32 bg-yellow-100 -z-10 rounded-b-full transform -translate-y-16"></div>
+                  <div className="text-6xl mb-4 animate-bounce">🚉</div>
+                  <h2 className="text-3xl font-black text-slate-800 mb-4 uppercase">Vagnarna är fulla!</h2>
+                  <p className="text-xl font-bold text-slate-600 mb-8">
+                      Du har samlat massor av gods. Vill du köra tåget och leverera det nu?
+                  </p>
+                  <div className="flex flex-col gap-4">
+                      <button 
+                          onClick={handleStartDelivery}
+                          className="bg-green-500 hover:bg-green-600 text-white text-2xl font-black py-4 rounded-xl border-b-8 border-green-700 active:border-b-0 active:translate-y-2 transition-all uppercase"
+                      >
+                          JA! JAG VILL KÖRA! 🚂
+                      </button>
+                      <button 
+                          onClick={() => setShowDeliveryPrompt(false)}
+                          className="bg-slate-200 hover:bg-slate-300 text-slate-600 font-bold py-3 rounded-xl transition-colors"
+                      >
+                          Nej, jag vill samla mer först
+                      </button>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {/* Medal Celebration Modal */}
+      {showMedalCelebration && (
+           <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4 animate-fade-in">
+              <div className="bg-white rounded-3xl p-8 max-w-lg w-full text-center border-8 border-yellow-400 shadow-2xl">
+                  <div className="text-8xl mb-4 animate-spin-slow">🥇</div>
+                  <h2 className="text-3xl font-black text-yellow-600 mb-2 uppercase">GULDMEDALJ!</h2>
+                  <p className="text-xl font-bold text-slate-600 mb-8">
+                      Du levererade allt gods! Bra jobbat!
+                  </p>
+                  <button 
+                      onClick={() => setShowMedalCelebration(false)}
+                      className="bg-blue-600 hover:bg-blue-700 text-white text-xl font-black py-4 px-8 rounded-xl shadow-lg w-full uppercase"
+                  >
+                      TACK!
+                  </button>
+              </div>
+           </div>
+      )}
+
       <main className={`flex-1 max-w-3xl mx-auto w-full pb-32 ${isMissionActive ? 'p-2 pt-4' : 'p-4'}`}>
         
         {!selectedSubject ? (
@@ -597,6 +703,13 @@ export default function App() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mt-8 animate-fade-in">
             <div className="col-span-1 sm:col-span-2 text-center mb-8">
               <Conductor message="VÄLKOMMEN TILLBAKA! VAD VILL DU TRÄNA PÅ IDAG?" mood="happy" />
+              {(gameState.medals?.length || 0) > 0 && (
+                 <div className="mt-4 flex justify-center gap-2 flex-wrap">
+                     {gameState.medals.map((m, i) => (
+                         <div key={i} className="text-2xl" title={m.date}>🥇</div>
+                     ))}
+                 </div>
+              )}
             </div>
 
             {(Object.keys(settings.subjectDifficulty) as Subject[]).map((subject) => (
@@ -776,7 +889,7 @@ export default function App() {
       </main>
 
       {/* FIXED BOTTOM TRAIN (Desktop Only) */}
-      <div className="hidden md:block sticky bottom-0 z-40 shadow-2xl pointer-events-none">
+      <div className="hidden md:block sticky bottom-0 z-30 shadow-2xl pointer-events-none">
         <div className="pointer-events-auto">
            <TrainViz cars={gameState.cars} />
         </div>
