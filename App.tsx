@@ -21,9 +21,10 @@ interface LayoutProps {
   setSettings: (settings: AppSettings) => void;
   showSettings: boolean;
   setShowSettings: (show: boolean) => void;
+  onStartTest: () => void;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children, settings, setSettings, showSettings, setShowSettings }) => (
+const Layout: React.FC<LayoutProps> = ({ children, settings, setSettings, showSettings, setShowSettings, onStartTest }) => (
   <div className={`min-h-screen flex flex-col bg-slate-50 ${settings.useUppercase ? 'uppercase' : ''}`}>
      {children}
      {showSettings && (
@@ -31,6 +32,7 @@ const Layout: React.FC<LayoutProps> = ({ children, settings, setSettings, showSe
         settings={settings} 
         onUpdateSettings={setSettings} 
         onClose={() => setShowSettings(false)} 
+        onStartTestGame={onStartTest}
       />
      )}
   </div>
@@ -165,6 +167,9 @@ export default function App() {
   const [showDeliveryPrompt, setShowDeliveryPrompt] = useState(false);
   const [isPlayingDelivery, setIsPlayingDelivery] = useState(false);
   const [showMedalCelebration, setShowMedalCelebration] = useState(false);
+  
+  // TEST MODE STATE
+  const [deliveryOverrideCars, setDeliveryOverrideCars] = useState<TrainCar[] | null>(null);
 
   // Determine if we are in active gameplay to condense the UI
   const isMissionActive = !!selectedSubject;
@@ -561,9 +566,33 @@ export default function App() {
       setShowDeliveryPrompt(false);
       setIsPlayingDelivery(true);
   };
+  
+  const handleStartTestDelivery = () => {
+      // Create dummy cars for test mode
+      const dummies: TrainCar[] = Array.from({length: 5}).map((_, i) => ({
+          id: `test-${i}`, 
+          type: 'CARGO', // Will map to default wagon type in game
+          color: CAR_COLORS[i % CAR_COLORS.length]
+      }));
+      
+      const testTrain = [
+          { id: 'loco', type: 'LOCOMOTIVE' as const, color: 'red' },
+          ...dummies
+      ];
+      
+      setDeliveryOverrideCars(testTrain);
+      setShowSettings(false);
+      setTimeout(() => setIsPlayingDelivery(true), 100);
+  };
 
   const handleDeliveryComplete = () => {
       setIsPlayingDelivery(false);
+      
+      // Check if it was a test run
+      if (deliveryOverrideCars) {
+          setDeliveryOverrideCars(null);
+          return; // Do not award medals or reset real train
+      }
       
       // Reset train to just locomotive
       const newMedal: Medal = {
@@ -590,12 +619,18 @@ export default function App() {
   };
 
   return (
-    <Layout settings={settings} setSettings={setSettings} showSettings={showSettings} setShowSettings={setShowSettings}>
+    <Layout 
+        settings={settings} 
+        setSettings={setSettings} 
+        showSettings={showSettings} 
+        setShowSettings={setShowSettings}
+        onStartTest={handleStartTestDelivery}
+    >
       
       {/* DELIVERY GAME OVERLAY */}
       {isPlayingDelivery && (
           <TrainDeliveryGame 
-             cars={gameState.cars} 
+             cars={deliveryOverrideCars || gameState.cars} 
              onComplete={handleDeliveryComplete} 
           />
       )}

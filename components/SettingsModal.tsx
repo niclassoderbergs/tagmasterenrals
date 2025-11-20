@@ -8,6 +8,7 @@ interface SettingsModalProps {
   settings: AppSettings;
   onUpdateSettings: (newSettings: AppSettings) => void;
   onClose: () => void;
+  onStartTestGame: () => void;
 }
 
 const SUBJECT_LABELS: Record<Subject, string> = {
@@ -25,7 +26,7 @@ const LEVEL_LABELS: Record<number, string> = {
   5: 'UTMANANDE'
 };
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onUpdateSettings, onClose }) => {
+export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onUpdateSettings, onClose, onStartTestGame }) => {
   const [view, setView] = useState<'MAIN' | 'ADVANCED'>('MAIN');
   
   const [backupStatus, setBackupStatus] = useState<string>("");
@@ -33,7 +34,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onUpdate
   const [storageEst, setStorageEst] = useState<StorageEstimate | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
   const [connectionErrorMsg, setConnectionErrorMsg] = useState<string>("");
-  const [cloudStatus, setCloudStatus] = useState<string>("");
   const [tempFirebaseConfig, setTempFirebaseConfig] = useState<string>("");
   
   // Cleanup State
@@ -56,6 +56,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onUpdate
   
   // Cloud Stats
   const [cloudStats, setCloudStats] = useState<CloudStats | null>(null);
+  const [cloudStatus, setCloudStatus] = useState<string>("");
   const [checkingCloud, setCheckingCloud] = useState(false);
 
   // Question Generator State
@@ -491,7 +492,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onUpdate
                                 />
                                 <span className="font-black text-xl text-slate-700 w-8 text-center">{settings.deliveryTriggerCount || 5}</span>
                              </div>
-                             <p className="text-[9px] text-slate-400">Standard är 5. Sätt till 1 för att testa spelet direkt.</p>
+                             <p className="text-[9px] text-slate-400 mb-2">Standard är 5. Sätt till 1 för att testa spelet direkt.</p>
+                         </div>
+
+                         <div>
+                             <label className="block text-xs font-bold text-slate-500 uppercase mb-1">TESTA LEVERANSSPEL</label>
+                             <button 
+                                onClick={onStartTestGame}
+                                className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 rounded-lg text-xs shadow-sm uppercase"
+                             >
+                                STARTA MED 5 VAGNAR (TEST)
+                             </button>
+                             <p className="text-[9px] text-slate-400 mt-1">Startar spelet direkt med 5 låtsasvagnar.</p>
                          </div>
                      </div>
                 </div>

@@ -223,7 +223,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
 
   // --- TERRAIN GENERATION ---
   const getTerrainY = (x: number) => {
-    // We want terrain to "move right" as we drive "left". 
     // Input x is world coordinate.
     const base = Math.sin(x * 0.0015) * 80; 
     const detail = Math.sin(x * 0.005) * 20;
@@ -262,8 +261,8 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
       if (state.throttle > 0.1) setShowStartHint(false);
 
       // 1. PHYSICS UPDATE
-      // We simulate moving "forward" in distance, but visually render "left".
-      // Distance increases as we drive.
+      // We simulate moving "Left" (Backing up) by increasing positive distance
+      // and rendering features as if we are entering positive X coordinates.
       
       const locoWorldPos = state.distance; 
       const currentSlope = getSlope(locoWorldPos);
@@ -284,13 +283,13 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
 
       // Wagon Physics
       state.wagons.forEach((w, i) => {
-        // Wagons are "behind" the loco distance-wise, but visually to the left?
-        // If backing up (Moving Left), the loco is on the Right (Front).
-        // So the wagons are at `distance - offset`.
-        // Actually, let's say Loco is at `state.distance`.
-        // Wagon 1 is at `state.distance - 140`.
+        // Wagons are PUSHED by the locomotive.
+        // Movement is Left (Positive World X).
+        // Wagons are "Ahead" of the loco in movement direction.
+        // Loco is at `state.distance`.
+        // Wagon 1 is at `state.distance + 140`.
         
-        const wagonWorldX = state.distance - 140 - (i * 130);
+        const wagonWorldX = state.distance + 140 + (i * 130);
         const wSlope = getSlope(wagonWorldX);
         
         // Bouncy logic
@@ -350,6 +349,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
       ctx.fillStyle = 'rgba(255,255,255,0.6)';
       for(let i=0; i<6; i++) {
         // Clouds move Right as we move Left
+        // state.distance increases => cx increases => moves Right.
         const cx = ((i * 400) + (state.distance * 0.2)) % (W + 400) - 200;
         ctx.beginPath();
         ctx.arc(cx, 80 + (i*30), 50 + (i*10), 0, Math.PI*2);
@@ -357,11 +357,10 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
       }
 
       // Ground/Terrain
-      // If Loco is at Screen X = Right side, and Train moves Left...
-      // Then terrain must flow from Left to Right.
-      // We render terrain relative to Loco World Pos.
-      
-      const LOCO_SCREEN_X = W - 300; // Loco fixed on Right side
+      // NEW: Position train on LEFT HALF of screen.
+      // W * 0.45 puts the Locomotive at 45% width.
+      // Since wagons are to the LEFT of the Locomotive, they will fill the 0-45% area.
+      const LOCO_SCREEN_X = W * 0.45;
       
       ctx.fillStyle = '#e2e8f0'; 
       ctx.beginPath();
@@ -371,11 +370,12 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
       const resolution = 20;
       // Loop across screen X
       for(let sx=0; sx<=W+resolution; sx+=resolution) {
-         // Mapping ScreenX to WorldX
-         // At sx = LOCO_SCREEN_X, worldX = state.distance
-         // worldX = state.distance - (LOCO_SCREEN_X - sx)
+         // Backing Up (Moving Left):
+         // New terrain enters from Left (sx=0). Old terrain exits Right (sx=W).
+         // At sx=LOCO, WorldX = state.distance.
+         // At sx=0, WorldX = state.distance + LOCO (Ahead).
          
-         const worldX = state.distance - (LOCO_SCREEN_X - sx);
+         const worldX = state.distance + (LOCO_SCREEN_X - sx);
          const y = H - getTerrainY(worldX);
          ctx.lineTo(sx, y);
       }
@@ -387,7 +387,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
       ctx.strokeStyle = '#475569';
       ctx.beginPath();
       for(let sx=0; sx<=W+resolution; sx+=resolution) {
-         const worldX = state.distance - (LOCO_SCREEN_X - sx);
+         const worldX = state.distance + (LOCO_SCREEN_X - sx);
          const y = H - getTerrainY(worldX);
          if (sx===0) ctx.moveTo(sx, y); else ctx.lineTo(sx, y);
       }
@@ -397,18 +397,18 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
       const drawRotated = (x: number, y: number, angle: number, drawFn: () => void) => {
          ctx.save();
          ctx.translate(x, y);
-         ctx.rotate(angle); // Positive rotation matches slope for Left movement visual?
-         // Slope is dy/dx. If moving Left, x decreases. 
-         // Let's stick to standard visual: if slope > 0, it goes UP to the right.
+         ctx.rotate(angle); 
          drawFn();
          ctx.restore();
       };
 
-      // DRAW WAGONS (Left of Loco)
+      // DRAW WAGONS (Left of Loco, "Ahead" in world space)
       state.wagons.forEach((w, i) => {
          const gap = 140;
+         // Screen pos: Left of Loco
          const wagonScreenX = LOCO_SCREEN_X - 140 - (i * gap);
-         const wagonWorldX = state.distance - 140 - (i * 130); // Physics pos
+         // World pos: Ahead (Positive X direction)
+         const wagonWorldX = state.distance + 140 + (i * 130);
          
          // Only draw if on screen
          if (wagonScreenX < -150 || wagonScreenX > W + 150) return;
@@ -419,7 +419,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
          drawRotated(wagonScreenX, y - 15, Math.atan(slope), () => {
             // Wheels
             ctx.fillStyle = '#1f2937';
-            const wheelRot = -state.distance * 0.1; // Negative rotation for backing/left move
+            const wheelRot = state.distance * 0.1; // Positive rotation for backing (CCW)
             const drawWheel = (wx: number) => {
                ctx.beginPath(); ctx.arc(wx, 10, 10, 0, Math.PI*2); ctx.fill();
                ctx.strokeStyle = '#9ca3af'; ctx.lineWidth=2;
@@ -486,15 +486,13 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
              ctx.beginPath(); ctx.arc(wx, 10, s, 0, Math.PI*2); ctx.fill();
              ctx.strokeStyle = 'white'; ctx.lineWidth=2;
              ctx.beginPath(); 
-             const rot = -state.distance * 0.1; // Negative for left move
+             const rot = state.distance * 0.1; // Positive for backing
              ctx.moveTo(wx + Math.cos(rot)*s, 10 + Math.sin(rot)*s);
              ctx.lineTo(wx - Math.cos(rot)*s, 10 - Math.sin(rot)*s);
              ctx.stroke();
           };
           
-          // Orientation: If "Backing", is the Cab on the Left or Right?
-          // Usually Loco pushes with flat side. 
-          // Let's draw it facing Left (Cowcatcher on Left).
+          // Orientation: Facing LEFT (Cowcatcher on Left)
           
           drawWheel(20, 14); // Rear (Right)
           drawWheel(-15, 10); 
@@ -516,12 +514,12 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
           ctx.lineTo(-50, 10);
           ctx.fill();
           
-          // Smoke
+          // Smoke (Blowing Right as train moves Left)
           if (state.throttle > 0 && Math.random() > 0.7) {
              state.particles.push({
                x: LOCO_SCREEN_X - 40,
                y: locoY - 60,
-               vx: state.speed + 2, // Smoke blows Right as train moves Left
+               vx: state.speed + 2, // Smoke blows Right
                vy: -2 - Math.random()*2,
                life: 50, color: 'rgba(255,255,255,0.4)', size: 5 + Math.random()*5
              });
@@ -558,10 +556,10 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
           <div className="absolute bottom-0 w-full h-1/3 bg-[#e2e8f0] border-t-4 border-[#475569]"></div>
           
           <div className="absolute top-4 md:top-10 left-4 md:left-1/2 md:-translate-x-1/2 z-40 animate-bounce-in">
-              <div className="bg-white p-4 rounded-2xl shadow-xl border-b-8 border-slate-200 relative max-w-xs">
+              <div className="bg-white p-4 rounded-2xl shadow-xl border-b-8 border-slate-200 relative max-w-sm">
                   <div className="absolute -bottom-4 left-8 md:left-1/2 w-6 h-6 bg-white rotate-45 border-r-8 border-b-8 border-slate-200"></div>
                   <p className="font-bold text-slate-800 text-sm md:text-base uppercase">
-                     "Jag orkar dra {maxSlots} vagnar! Ju fler du tar, desto mer <span className="text-yellow-600">guld</span> kan vi tjäna!"
+                     "JAG ORKAR DRA {maxSlots} {maxSlots === 1 ? 'VAGN' : 'VAGNAR'}! DU HAR SAMLAT {maxSlots} ST! <span className="text-yellow-600">FYLL ALLA PLATSERNA!</span>"
                   </p>
               </div>
           </div>
