@@ -12,28 +12,21 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
   
   // Game State
   const [localCars, setLocalCars] = useState<TrainCar[]>([...cars]);
-  const [gameSpeed, setGameSpeed] = useState(2); // 0 to 10
-  const [distance, setDistance] = useState(0);
+  const [gameSpeed, setGameSpeed] = useState(3); // Default speed slightly higher
   const [msg, setMsg] = useState("KÖR TILL NÄSTA STATION!");
-  const [showSwitchControls, setShowSwitchControls] = useState(false);
   const [cargoAnimation, setCargoAnimation] = useState<{active: boolean, x: number, y: number}>({ active: false, x: 0, y: 0 });
 
   // Constants
   const GROUND_HEIGHT = 100;
-  const PLATFORM_INTERVAL = 3000; // pixels
-  const SWITCH_INTERVAL = 1500; // pixels
-
+  
   // Refs for loop
   const stateRef = useRef({
     distance: 0,
     lastPlatformDist: 0,
-    lastSwitchDist: 0,
-    nextEntity: 'SWITCH', // 'SWITCH' or 'PLATFORM'
+    nextPlatformInterval: 4000, // Start interval
     snowflakes: [] as {x: number, y: number, r: number, v: number}[],
-    entities: [] as {type: 'PLATFORM' | 'SWITCH' | 'TREE', x: number, id: number}[],
-    trackOffset: 0,
-    isSwitching: false,
-    switchDirection: 'STRAIGHT' as 'STRAIGHT' | 'UP' | 'DOWN'
+    entities: [] as {type: 'PLATFORM' | 'TREE', x: number, id: number}[],
+    trackOffset: 0
   });
 
   // Init Snow
@@ -44,16 +37,10 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
         r: Math.random() * 3 + 1,
         v: Math.random() * 2 + 1
     }));
+    
+    // Initialize random next interval (approx 2000-5000 px)
+    stateRef.current.nextPlatformInterval = 2500 + Math.random() * 3000;
   }, []);
-
-  const handleSwitch = (dir: 'UP' | 'DOWN') => {
-      stateRef.current.switchDirection = dir;
-      setMsg(dir === 'UP' ? "BYTER TILL ÖVRE SPÅRET" : "BYTER TILL UNDRE SPÅRET");
-      setShowSwitchControls(false);
-      // Visual bump effect
-      stateRef.current.isSwitching = true;
-      setTimeout(() => { stateRef.current.isSwitching = false; }, 1000);
-  };
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -85,17 +72,14 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
             state.entities.push({ type: 'TREE', x: spawnEdge, id: Math.random() });
         }
 
-        // Switches & Platforms
-        if (state.distance > state.lastSwitchDist + SWITCH_INTERVAL && state.nextEntity === 'SWITCH') {
-             state.entities.push({ type: 'SWITCH', x: spawnEdge, id: Date.now() });
-             state.lastSwitchDist = state.distance;
-             state.nextEntity = 'PLATFORM';
-        }
-        
-        if (state.distance > state.lastPlatformDist + PLATFORM_INTERVAL && state.nextEntity === 'PLATFORM') {
+        // Platforms
+        // Logic: Spawn if distance exceeded last + interval
+        if (state.distance > state.lastPlatformDist + state.nextPlatformInterval) {
              state.entities.push({ type: 'PLATFORM', x: spawnEdge, id: Date.now() });
              state.lastPlatformDist = state.distance;
-             state.nextEntity = 'SWITCH';
+             // Set new random interval for next platform (roughly 20-45s at speed 3-5)
+             // Speed 3 = ~180px/s. 20s = 3600px. 45s = 8100px.
+             state.nextPlatformInterval = 4000 + Math.random() * 5000; 
         }
 
         // Move Entities
@@ -103,27 +87,14 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
         state.entities = state.entities.filter(e => e.x > -500); // Cleanup
 
         // CHECK EVENTS
-        // 1. Switch controls
-        const approachingSwitch = state.entities.find(e => e.type === 'SWITCH' && e.x > w/2 && e.x < w/2 + 400);
-        if (approachingSwitch && !showSwitchControls) {
-            // We interact via React state, so check external flag if we shouldn't update state in loop constantly
-            // Here we assume if 'showSwitchControls' is false, we trigger it.
-            // But since we are in a ref loop, we can't read the latest react state easily without a ref.
-            // Simplified: UI handles the display based on distance logic below in the component return, 
-            // or we just trigger a message.
-        }
-
-        // 2. Platform Delivery
-        // Train is approx at x = w/2. 
-        // Platform center is e.x + width/2.
-        const trainHeadX = w / 2 + 100; // TrainViz is centered-ish
+        // Platform Delivery
+        // Train is centered. TrainViz is around center.
+        // We define the "drop zone" near the center of the screen.
         const activePlatform = state.entities.find(e => e.type === 'PLATFORM' && Math.abs(e.x - (w/2 - 100)) < 10); // precise hit
         
         if (activePlatform) {
-             // Only deliver if we have cargo
+             // Only deliver if we have cargo (more than just loco)
              if (localCars.length > 1 && gameSpeed > 0) {
-                 // Slow down effect
-                 // Trigger React side effect
                  handlePlatformHit(activePlatform.x, h - GROUND_HEIGHT - 50);
              }
         }
@@ -137,7 +108,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
         ctx.fillRect(0, 0, w, h);
 
         // 2. MOUNTAINS (Parallax)
-        // Draw 3 layers of mountains moving at different speeds
         drawMountains(ctx, w, h, state.distance * 0.1, '#e2e8f0', 300); // Back
         drawMountains(ctx, w, h, state.distance * 0.2, '#cbd5e1', 200); // Mid
         drawMountains(ctx, w, h, state.distance * 0.5, '#94a3b8', 100); // Front
@@ -176,8 +146,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
         state.entities.forEach(e => {
             if (e.type === 'TREE') {
                 drawTree(ctx, e.x, groundY - 20);
-            } else if (e.type === 'SWITCH') {
-                drawSwitch(ctx, e.x, groundY - 20);
             } else if (e.type === 'PLATFORM') {
                 drawPlatform(ctx, e.x, groundY - 20);
             }
@@ -207,7 +175,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
         const peakWidth = 300;
         // Generate peaks based on sin waves to look infinite
         for(let x = - (offset % peakWidth); x < w + peakWidth; x += peakWidth/2) {
-             // deterministic pseudo random height
              const noise = Math.sin((x + offset) * 0.01) * 50;
              ctx.lineTo(x, h - GROUND_HEIGHT - height + noise);
              ctx.lineTo(x + peakWidth/4, h - GROUND_HEIGHT - height/2);
@@ -215,10 +182,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
         
         ctx.lineTo(w, h);
         ctx.fill();
-        
-        // Snow caps
-        ctx.fillStyle = 'white';
-        // Simple overlay for snow caps (triangles at peaks)
     };
 
     const drawTree = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
@@ -237,23 +200,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
         ctx.lineTo(x, y-80);
         ctx.lineTo(x+10, y-60);
         ctx.fill();
-    };
-
-    const drawSwitch = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
-        ctx.fillStyle = '#333';
-        ctx.fillRect(x, y - 40, 10, 40); // Pole
-        ctx.fillStyle = '#ef4444'; // Signal Light Red
-        ctx.beginPath();
-        ctx.arc(x+5, y-45, 8, 0, Math.PI*2);
-        ctx.fill();
-        
-        // Track fork visual on ground
-        ctx.strokeStyle = '#64748b';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(x - 50, y + 10);
-        ctx.lineTo(x + 50, y - 20); // Fork up
-        ctx.stroke();
     };
 
     const drawPlatform = (ctx: CanvasRenderingContext2D, x: number, y: number) => {
@@ -284,27 +230,24 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
     
     render();
     return () => cancelAnimationFrame(frameId);
-  }, [localCars, gameSpeed]); // Dependencies for render loop init
+  }, [localCars, gameSpeed]); 
 
   // EXTERNAL REACT LOGIC
   
   const handlePlatformHit = (platformX: number, platformY: number) => {
-      // Debounce logic handled by stateRef logic in loop usually, but we need to be careful here.
-      // To simplify: We just remove the car.
-      
-      // We assume this is called ONCE per platform pass due to the precise hit check in loop
       setLocalCars(prev => {
           if (prev.length <= 1) return prev;
           
-          // Animate Cargo
+          // Animate Cargo flying from left side of train (back)
+          // Since train is [Car, Car, Loco], the "Back" is the left side.
           setCargoAnimation({
               active: true,
-              x: window.innerWidth / 2 + 100, // Train tail approx
+              x: window.innerWidth / 2 - 200, 
               y: window.innerHeight - 200
           });
           setTimeout(() => setCargoAnimation(prev => ({...prev, active: false})), 1000);
 
-          const newCars = prev.slice(0, -1);
+          const newCars = prev.slice(0, -1); // Removes the last added car (which visually is at the back)
           setMsg("LEVERANS KLAR! BRA JOBBAT!");
           
           // Win Condition
@@ -317,32 +260,15 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
       });
   };
 
-  // Check for Switch UI visibility based on distance (Polling effect)
-  // Since the canvas loop runs outside React state, we can use a simpler timer for UI updates
-  useEffect(() => {
-      const interval = setInterval(() => {
-           const state = stateRef.current;
-           const approachingSwitch = state.entities.find(e => e.type === 'SWITCH' && e.x > window.innerWidth/2 && e.x < window.innerWidth - 200);
-           
-           if (approachingSwitch) {
-               setShowSwitchControls(true);
-           } else {
-               setShowSwitchControls(false);
-           }
-      }, 200);
-      return () => clearInterval(interval);
-  }, []);
-
   return (
     <div className="fixed inset-0 z-50 bg-slate-900 text-white overflow-hidden">
       <canvas ref={canvasRef} className="block w-full h-full" />
       
       {/* TRAIN OVERLAY */}
-      {/* We position the TrainViz fixed in the center-ish */}
       <div className="absolute bottom-[100px] left-0 right-0 flex justify-center pointer-events-none">
-          {/* Container width determines train alignment. We want locomotive near center */}
           <div className="w-[800px] relative transform translate-x-32"> 
-              <TrainViz cars={localCars} hideTrack={true} />
+              {/* We reverse the cars array here so the Locomotive (first in array) ends up on the RIGHT side in RTL layout */}
+              <TrainViz cars={[...localCars].reverse()} hideTrack={true} />
           </div>
       </div>
       
@@ -353,7 +279,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
             style={{ 
                 left: cargoAnimation.x, 
                 top: cargoAnimation.y,
-                transform: 'translate(200px, -200px) rotate(360deg) scale(0.5)',
+                transform: 'translate(-200px, -200px) rotate(-360deg) scale(0.5)',
                 opacity: 0
             }}
           >
@@ -369,7 +295,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
         </div>
       </div>
 
-      {/* SPEED CONTROL (Bottom Left) */}
+      {/* SPEED CONTROL */}
       <div className="absolute bottom-8 left-8 flex flex-col items-center bg-slate-800/80 p-4 rounded-2xl border-2 border-slate-600">
            <div className="text-xs font-bold mb-2 uppercase text-slate-300">Hastighet</div>
            <input 
@@ -383,27 +309,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
            />
            <div className="mt-2 font-mono text-xl font-bold">{gameSpeed}</div>
       </div>
-
-      {/* SWITCH CONTROLS (Right Side) */}
-      {showSwitchControls && (
-          <div className="absolute bottom-32 right-8 flex flex-col gap-4 animate-bounce-in">
-               <div className="text-center bg-red-600 text-white font-black px-2 py-1 rounded uppercase text-sm mb-1 animate-pulse">Växel!</div>
-               <button 
-                  onClick={() => handleSwitch('UP')}
-                  className="w-24 h-24 bg-yellow-400 hover:bg-yellow-300 rounded-xl border-b-8 border-yellow-600 active:border-b-0 active:translate-y-2 shadow-xl flex flex-col items-center justify-center group"
-               >
-                  <span className="text-4xl group-hover:-translate-y-1 transition-transform">⬆️</span>
-                  <span className="text-xs font-black text-yellow-900 mt-1">ÖVRE</span>
-               </button>
-               <button 
-                  onClick={() => handleSwitch('DOWN')}
-                  className="w-24 h-24 bg-yellow-400 hover:bg-yellow-300 rounded-xl border-b-8 border-yellow-600 active:border-b-0 active:translate-y-2 shadow-xl flex flex-col items-center justify-center group"
-               >
-                  <span className="text-4xl group-hover:translate-y-1 transition-transform">⬇️</span>
-                   <span className="text-xs font-black text-yellow-900 mt-1">UNDRE</span>
-               </button>
-          </div>
-      )}
 
       {/* Exit Button */}
       <button 
