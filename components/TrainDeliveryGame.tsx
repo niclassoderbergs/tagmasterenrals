@@ -564,8 +564,21 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
               </div>
           </div>
 
+          {/* START BUTTON - Moved here to avoid clipping and ensure visibility */}
+          {selectedWagons.length > 0 && (
+             <div className="absolute top-[25%] left-1/2 transform -translate-x-1/2 z-50 animate-bounce w-full flex justify-center pointer-events-none">
+                <div className="pointer-events-auto">
+                    <button 
+                      onClick={finalizeBuild}
+                      className="bg-green-500 hover:bg-green-600 text-white text-xl md:text-3xl font-black py-3 px-8 md:py-4 md:px-12 rounded-full shadow-2xl border-b-8 border-green-700 active:border-b-0 active:translate-y-2 uppercase tracking-widest whitespace-nowrap"
+                    >
+                      KÖR TÅGET! ▶
+                    </button>
+                </div>
+             </div>
+          )}
+
           {/* TRAIN PREVIEW (Reversed Order: Wagons -> Loco) */}
-          {/* Added overflow-x-auto to container to handle long trains */}
           <div className="w-full overflow-x-auto pb-8 pt-4 no-scrollbar">
              <div className="flex items-end justify-center min-w-max px-8 mx-auto gap-1 relative z-10 mb-10">
                 
@@ -603,18 +616,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ cars, onCo
                    <div className="absolute bottom-2 right-0 w-1/2 h-full bg-slate-800 rounded-t-lg z-10"></div>
                    <div className="absolute bottom-2 left-0 w-10 h-10 bg-slate-900 skew-x-12"></div> 
                 </div>
-                
-                {/* START BUTTON */}
-                {selectedWagons.length > 0 && (
-                   <div className="absolute -top-32 left-1/2 transform -translate-x-1/2 animate-bounce z-50">
-                      <button 
-                        onClick={finalizeBuild}
-                        className="bg-green-500 hover:bg-green-600 text-white text-2xl md:text-4xl font-black py-4 px-12 rounded-full shadow-2xl border-b-8 border-green-700 active:border-b-0 active:translate-y-2 uppercase tracking-widest whitespace-nowrap"
-                      >
-                        KÖR TÅGET! ▶
-                      </button>
-                   </div>
-                )}
              </div>
           </div>
         </div>
