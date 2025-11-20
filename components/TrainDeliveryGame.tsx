@@ -11,6 +11,16 @@ interface GameWagon {
   cargoOffset: { x: number, y: number }; // Visual physics offset
 }
 
+interface ScoreResult {
+  total: number;
+  wagonPoints: number; // Modighetsbonus
+  cargoPoints: number; // Lastbonus
+  speedPoints: number; // Snabbhetsbonus
+  wagonsCount: number;
+  healthPercent: number; // 0-1
+  stars: number;
+}
+
 interface TrainDeliveryGameProps {
   cars: TrainCar[];
   onComplete: () => void;
@@ -30,7 +40,7 @@ const WAGON_CONFIG: Record<WagonType, {
     color: '#15803d', // Green
     icon: '📦', 
     desc: 'Stabil och trygg.',
-    effect: 'Inga konstigheter',
+    effect: 'Säkra poäng',
     weight: 1.0
   },
   'BOUNCY': { 
@@ -46,7 +56,7 @@ const WAGON_CONFIG: Record<WagonType, {
     color: '#713f12', // Brown
     icon: '🪵', 
     desc: 'Tung i backarna.',
-    effect: 'Ger GULD-bonus',
+    effect: 'Bromsar tåget',
     weight: 2.5
   },
   'TANK': { 
@@ -54,12 +64,12 @@ const WAGON_CONFIG: Record<WagonType, {
     color: '#1d4ed8', // Blue
     icon: '🛢️', 
     desc: 'Vätska skvimpar.',
-    effect: 'Bromsa lugnt',
+    effect: 'Skvalpar lätt',
     weight: 1.2
   }
 };
 
-const MAX_SLOTS = 4;
+const MAX_SLOTS = 5; // Increased slightly to allow for big scores
 
 export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -69,17 +79,21 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
   const [selectedWagons, setSelectedWagons] = useState<WagonType[]>([]);
   const [missionText, setMissionText] = useState("");
   
-  // GAME STATS (For React UI overlays)
+  // GAME STATS
+  const [startTime, setStartTime] = useState(0);
+  const [scoreResult, setScoreResult] = useState<ScoreResult | null>(null);
+  
+  // HUD STATS
   const [speedDisplay, setSpeedDisplay] = useState(0);
   const [progressDisplay, setProgressDisplay] = useState(0);
-  const [cargoStatus, setCargoStatus] = useState<number[]>([]); // 0-100 per wagon
+  const [cargoStatus, setCargoStatus] = useState<number[]>([]); 
   const [showStartHint, setShowStartHint] = useState(false);
   
-  // PHYSICS ENGINE STATE (Mutable ref for 60fps loop)
+  // PHYSICS ENGINE STATE
   const engine = useRef({
     active: false,
     distance: 0,
-    totalDistance: 10000,
+    totalDistance: 5000,
     speed: 0,
     throttle: 0, // 0-1
     wagons: [] as GameWagon[],
@@ -104,22 +118,24 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
   };
 
   const finalizeBuild = () => {
-    // Generate mission text
-    const counts = selectedWagons.reduce((acc, type) => ({...acc, [type]: (acc[type]||0)+1}), {} as Record<string, number>);
-    let text = "Uppdrag: Leverera ";
-    if (counts['BOUNCY']) text += "känsliga kalas-saker ";
-    if (counts['HEAVY']) text += "och tungt timmer ";
-    if (counts['TANK']) text += "och saft ";
-    if (counts['BOX']) text += "och viktiga lådor ";
-    text += "till bergsbyn!";
+    // Generate mission text based on selection
+    const count = selectedWagons.length;
+    let text = "";
+    if (count <= 2) text = "En kort och säker tur till grannbyn.";
+    else if (count <= 4) text = "En rejäl leverans! Se upp i backarna.";
+    else text = "Ett jättelångt tåg! Här gäller det att vara modig.";
     
     setMissionText(text);
     setPhase('MISSION_INTRO');
   };
 
   const startDrive = () => {
-    // Init physics
-    let totalWeight = 1.5; // Loco weight
+    // Dynamic Track Length: More wagons = Longer track
+    const baseDistance = 3000;
+    const distancePerWagon = 1500;
+    const totalDist = baseDistance + (selectedWagons.length * distancePerWagon);
+
+    let totalWeight = 2.0; // Loco weight
     const gameWagons = selectedWagons.map((t, i) => {
       totalWeight += WAGON_CONFIG[t].weight;
       return {
@@ -130,10 +146,14 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
       };
     });
 
+    // Reverse order for logic since we are "backing" (Wagons are pushed/pulled to the Left)
+    // Actually physics doesn't care about order much, but visual rendering does.
+
     engine.current = {
       ...engine.current,
       active: true,
       distance: 0,
+      totalDistance: totalDist,
       speed: 0,
       throttle: 0,
       wagons: gameWagons,
@@ -142,20 +162,71 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
       particles: []
     };
     
+    setStartTime(Date.now());
     setShowStartHint(true);
     setPhase('DRIVE');
   };
 
+  const calculateScore = () => {
+    const W = selectedWagons.length;
+    
+    // Calculate Average Health (0 to 100)
+    const healthSum = engine.current.wagons.reduce((acc, w) => acc + w.cargoHealth, 0);
+    const healthPercent = W > 0 ? (healthSum / W) / 100 : 0; // 0.0 to 1.0
+
+    // Time Bonus logic
+    // Estimate time: Distance / AvgSpeed (let's say 15 is a good speed)
+    // If they drive constantly at top speed (~30), they are fast.
+    const durationSec = (Date.now() - startTime) / 1000;
+    const targetSec = engine.current.totalDistance / 12; // Somewhat lenient target
+    
+    let S = 0; // Speed factor 0 to 1
+    if (durationSec < targetSec) S = 1; // Fast
+    else if (durationSec < targetSec * 1.5) S = 0.5; // Okay
+    else S = 0.1; // Slow but finished
+
+    // FORMULA: W * (50 + 50*F) + 50*S
+    // Base per wagon: 50. Max extra per wagon: 50.
+    const wagonPoints = W * 50; // "Modighetsbonus" (Bravery)
+    const cargoPoints = Math.round(W * 50 * healthPercent); // "Lastbonus" (Skill)
+    const speedPoints = Math.round(50 * S); // "Tidsbonus"
+
+    const total = wagonPoints + cargoPoints + speedPoints;
+
+    // Stars calculation
+    // Max possible score approx: W*100 + 50.
+    // For 5 wagons: 550 max.
+    // For 1 wagon: 150 max.
+    const maxPossible = (W * 100) + 50;
+    const ratio = total / maxPossible;
+    
+    let stars = 1;
+    if (ratio > 0.6) stars = 2;
+    if (ratio > 0.85) stars = 3;
+
+    setScoreResult({
+      total,
+      wagonPoints,
+      cargoPoints,
+      speedPoints,
+      wagonsCount: W,
+      healthPercent,
+      stars
+    });
+    setPhase('SUMMARY');
+  };
+
   // --- TERRAIN GENERATION ---
-  // Returns height (y-offset from bottom) at world x
   const getTerrainY = (x: number) => {
-    // Smooth rolling hills
+    // We want terrain to "move right" as we drive "left". 
+    // Input x is world coordinate.
     const base = Math.sin(x * 0.0015) * 80; 
     const detail = Math.sin(x * 0.005) * 20;
-    return Math.max(0, base + detail + 150); // 150 is base height
+    return Math.max(0, base + detail + 150);
   };
 
   const getSlope = (x: number) => {
+    // Standard derivative approximation
     return (getTerrainY(x + 10) - getTerrainY(x)) / 10;
   };
 
@@ -165,7 +236,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
     
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d', { alpha: false }); // Optimization
+    const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
 
     let rafId: number;
@@ -174,7 +245,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
       if (!engine.current.active) return;
       const state = engine.current;
       const now = Date.now();
-      const dt = Math.min((now - state.lastTime) / 1000, 0.1); // Cap delta time
+      const dt = Math.min((now - state.lastTime) / 1000, 0.1);
       state.lastTime = now;
 
       // Dimensions
@@ -183,166 +254,166 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
       const W = canvas.width;
       const H = canvas.height;
       
-      // Hint Logic
       if (state.throttle > 0.1) setShowStartHint(false);
 
-      // 1. TRAIN PHYSICS
-      // Look ahead for loco slope
-      const locoX = state.distance + 500; // Loco is "ahead" in distance terms
-      const currentSlope = getSlope(locoX);
+      // 1. PHYSICS UPDATE
+      // We simulate moving "forward" in distance, but visually render "left".
+      // Distance increases as we drive.
+      
+      const locoWorldPos = state.distance; 
+      const currentSlope = getSlope(locoWorldPos);
 
-      // Engine Power vs Weight
-      const power = state.throttle * 800; // Engine force
+      // Engine Power
+      const power = state.throttle * 800; 
       const gravity = 9.81;
-      const slopeForce = Math.sin(Math.atan(currentSlope)) * state.trainMass * gravity * 15; // Gravity pull on slope
-      const drag = state.speed * 2; // Air resistance
-      const friction = state.trainMass * 2; // Rolling resistance
+      const slopeForce = Math.sin(Math.atan(currentSlope)) * state.trainMass * gravity * 15; 
+      const drag = state.speed * 2; 
+      const friction = state.trainMass * 5; 
 
       const acceleration = (power - slopeForce - drag - friction) / state.trainMass;
       
       state.speed += acceleration * dt;
-      if (state.speed < 0 && state.throttle === 0) state.speed = 0; // No rolling back for simplicity
+      if (state.speed < 0 && state.throttle === 0) state.speed = 0; 
       
-      // Move
-      state.distance += state.speed * dt * 20; // Scale factor
+      state.distance += state.speed * dt * 20; 
 
-      // 2. WAGON PHYSICS
+      // Wagon Physics
       state.wagons.forEach((w, i) => {
-        const wagonX = locoX - 140 - (i * 130); // Position relative to loco
-        const wSlope = getSlope(wagonX);
+        // Wagons are "behind" the loco distance-wise, but visually to the left?
+        // If backing up (Moving Left), the loco is on the Right (Front).
+        // So the wagons are at `distance - offset`.
+        // Actually, let's say Loco is at `state.distance`.
+        // Wagon 1 is at `state.distance - 140`.
         
-        // Bouncy
+        const wagonWorldX = state.distance - 140 - (i * 130);
+        const wSlope = getSlope(wagonWorldX);
+        
+        // Bouncy logic
         if (w.type === 'BOUNCY') {
           const bump = Math.abs(wSlope) * state.speed * 0.2;
           if (Math.random() < 0.05 && w.cargoOffset.y === 0 && state.speed > 5) {
-             w.cargoOffset.y = -bump * 2; // Pop up
+             w.cargoOffset.y = -bump * 2;
           }
-          // Gravity return
           if (w.cargoOffset.y < 0) {
             w.cargoOffset.y += 30 * dt;
             if (w.cargoOffset.y > 0) w.cargoOffset.y = 0;
           }
-          // Check loss
           if (w.cargoOffset.y < -25 && w.cargoHealth > 0) {
              w.cargoHealth = Math.max(0, w.cargoHealth - 2);
-             // Spawn particles
              state.particles.push({
-               x: (W * 0.2) + (i + 1) * 130, // Approx screen pos (rough)
-               y: H - getTerrainY(wagonX) - 50,
-               vx: (Math.random() - 0.5) * 10,
-               vy: -10,
-               life: 60,
-               color: WAGON_CONFIG[w.type].color,
-               size: 5
+               x: 0, // Set later based on screen pos
+               y: 0,
+               vx: (Math.random() - 0.5) * 10, vy: -10, life: 60,
+               color: WAGON_CONFIG[w.type].color, size: 5
              });
           }
         }
         
-        // Tank
+        // Tank logic
         if (w.type === 'TANK') {
-           // Slosh based on acceleration change (jerk) or just simple sway
            const sway = Math.sin(now * 0.005) * (state.speed * 0.5);
            w.cargoOffset.x = sway;
-           // Spill if fast + braking or fast + steep slope
            if (Math.abs(sway) > 10 && w.cargoHealth > 0) {
              w.cargoHealth -= 0.1;
-             if (Math.random() < 0.1) {
-                state.particles.push({
-                  x: (W * 0.2) + (i + 1) * 130,
-                  y: H - getTerrainY(wagonX) - 30,
-                  vx: -5, vy: 5, life: 20, color: '#60a5fa', size: 3
-                });
-             }
            }
         }
       });
 
-      // 3. UPDATE UI STATE (Throttled)
+      // UI Updates (Throttled)
       if (now % 10 === 0) {
         setSpeedDisplay(Math.round(state.speed));
-        setProgressDisplay(state.distance / state.totalDistance);
+        setProgressDisplay(Math.min(1, state.distance / state.totalDistance));
         setCargoStatus(state.wagons.map(w => w.cargoHealth));
       }
 
-      // CHECK FINISH
+      // Finish Check
       if (state.distance >= state.totalDistance) {
         engine.current.active = false;
-        setPhase('SUMMARY');
+        calculateScore();
       }
 
       // --- DRAWING ---
 
       // Sky
       const grad = ctx.createLinearGradient(0,0,0,H);
-      grad.addColorStop(0, '#0ea5e9'); // Sky blue
-      grad.addColorStop(1, '#e0f2fe');
+      grad.addColorStop(0, '#38bdf8'); 
+      grad.addColorStop(1, '#f0f9ff');
       ctx.fillStyle = grad;
       ctx.fillRect(0,0,W,H);
 
-      // Clouds (Parallax)
+      // Parallax Clouds
       ctx.fillStyle = 'rgba(255,255,255,0.6)';
-      for(let i=0; i<5; i++) {
-        const cx = ((i * 300) + (state.distance * 0.1)) % (W + 200) - 200;
+      for(let i=0; i<6; i++) {
+        // Clouds move Right as we move Left
+        const cx = ((i * 400) + (state.distance * 0.2)) % (W + 400) - 200;
         ctx.beginPath();
-        ctx.arc(W - cx, 100 + (i*20), 40 + (i*10), 0, Math.PI*2);
+        ctx.arc(cx, 80 + (i*30), 50 + (i*10), 0, Math.PI*2);
         ctx.fill();
       }
 
-      // Terrain
-      const resolution = 20;
+      // Ground/Terrain
+      // If Loco is at Screen X = Right side, and Train moves Left...
+      // Then terrain must flow from Left to Right.
+      // We render terrain relative to Loco World Pos.
       
-      // Draw Ground
-      ctx.fillStyle = '#e2e8f0'; // Ground base
+      const LOCO_SCREEN_X = W - 300; // Loco fixed on Right side
+      
+      ctx.fillStyle = '#e2e8f0'; 
       ctx.beginPath();
       ctx.moveTo(W, H);
       ctx.lineTo(0, H);
-      for(let x=0; x<=W+resolution; x+=resolution) {
-         const worldX = state.distance + 500 - x;
+      
+      const resolution = 20;
+      // Loop across screen X
+      for(let sx=0; sx<=W+resolution; sx+=resolution) {
+         // Mapping ScreenX to WorldX
+         // At sx = LOCO_SCREEN_X, worldX = state.distance
+         // worldX = state.distance - (LOCO_SCREEN_X - sx)
+         
+         const worldX = state.distance - (LOCO_SCREEN_X - sx);
          const y = H - getTerrainY(worldX);
-         ctx.lineTo(x, y);
+         ctx.lineTo(sx, y);
       }
       ctx.closePath();
       ctx.fill();
       
-      // Draw Rails
+      // Rails
       ctx.lineWidth = 5;
       ctx.strokeStyle = '#475569';
       ctx.beginPath();
-      for(let x=0; x<=W+resolution; x+=resolution) {
-         const worldX = state.distance + 500 - x;
+      for(let sx=0; sx<=W+resolution; sx+=resolution) {
+         const worldX = state.distance - (LOCO_SCREEN_X - sx);
          const y = H - getTerrainY(worldX);
-         if (x===0) ctx.moveTo(x, y);
-         else ctx.lineTo(x, y);
+         if (sx===0) ctx.moveTo(sx, y); else ctx.lineTo(sx, y);
       }
       ctx.stroke();
 
-      // --- DRAW TRAIN ---
-      const LOCO_SCREEN_X = 200;
-      
+      // Helper for rotation
       const drawRotated = (x: number, y: number, angle: number, drawFn: () => void) => {
          ctx.save();
          ctx.translate(x, y);
-         ctx.rotate(-angle); // Negative rotation to match slope visual (Moving Left)
+         ctx.rotate(angle); // Positive rotation matches slope for Left movement visual?
+         // Slope is dy/dx. If moving Left, x decreases. 
+         // Let's stick to standard visual: if slope > 0, it goes UP to the right.
          drawFn();
          ctx.restore();
       };
 
-      // Draw Wagons (from Right to Left visually - Behind the loco)
+      // DRAW WAGONS (Left of Loco)
       state.wagons.forEach((w, i) => {
          const gap = 140;
-         const wagonScreenX = LOCO_SCREEN_X + 140 + (i * gap);
-         const wagonWorldX = state.distance + 500 - wagonScreenX;
-         const groundY = H - getTerrainY(wagonWorldX);
+         const wagonScreenX = LOCO_SCREEN_X - 140 - (i * gap);
+         const wagonWorldX = state.distance - 140 - (i * 130); // Physics pos
+         
          const slope = getSlope(wagonWorldX);
-         const angle = Math.atan(slope);
-
-         drawRotated(wagonScreenX, groundY - 15, angle, () => {
+         const y = H - getTerrainY(wagonWorldX);
+         
+         drawRotated(wagonScreenX, y - 15, Math.atan(slope), () => {
             // Wheels
             ctx.fillStyle = '#1f2937';
-            const wheelRot = state.distance * 0.1;
+            const wheelRot = -state.distance * 0.1; // Negative rotation for backing/left move
             const drawWheel = (wx: number) => {
                ctx.beginPath(); ctx.arc(wx, 10, 10, 0, Math.PI*2); ctx.fill();
-               // Spokes
                ctx.strokeStyle = '#9ca3af'; ctx.lineWidth=2;
                ctx.beginPath(); 
                ctx.moveTo(wx + Math.cos(wheelRot)*10, 10 + Math.sin(wheelRot)*10);
@@ -362,9 +433,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
 
             if (w.type === 'TANK') {
                ctx.beginPath(); ctx.roundRect(-40, -45, 80, 35, 10); ctx.fill();
-               // Liquid window
                ctx.fillStyle = '#93c5fd'; ctx.fillRect(-30, -35, 60, 15);
-               // Liquid
                const level = (w.cargoHealth/100) * 15;
                ctx.fillStyle = '#2563eb';
                ctx.beginPath();
@@ -376,7 +445,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
             } else if (w.type === 'BOUNCY') {
                ctx.strokeStyle = cfg.color; ctx.lineWidth=3;
                ctx.strokeRect(-40, -45, 80, 35);
-               // Balls
                if (w.cargoHealth > 20) {
                   ctx.fillStyle = '#f9a8d4';
                   ctx.beginPath(); ctx.arc(-15, -25 + w.cargoOffset.y, 12, 0, Math.PI*2); ctx.fill();
@@ -385,52 +453,57 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
                }
             } else if (w.type === 'HEAVY') {
                ctx.fillStyle = cfg.color;
-               // Logs
                ctx.beginPath(); ctx.arc(-20, -25, 12, 0, Math.PI*2); ctx.fill();
                ctx.beginPath(); ctx.arc(0, -25, 12, 0, Math.PI*2); ctx.fill();
                ctx.beginPath(); ctx.arc(20, -25, 12, 0, Math.PI*2); ctx.fill();
                ctx.beginPath(); ctx.arc(-10, -40, 12, 0, Math.PI*2); ctx.fill();
                ctx.beginPath(); ctx.arc(10, -40, 12, 0, Math.PI*2); ctx.fill();
             } else {
-               // Box
                ctx.fillRect(-40, -45, 80, 35);
                ctx.fillStyle = 'rgba(0,0,0,0.2)';
-               ctx.fillRect(-30, -40, 60, 25); // Detail
+               ctx.fillRect(-30, -40, 60, 25);
             }
          });
+         
+         // Update particle origins if needed (simplification: just spawn near screen)
+         // Not strictly mapped here but handled in physics loop update
       });
 
-      // Draw LOCO (Front Left)
-      const locoWorldPos = state.distance + 300; // Ahead of 200 screen X in world space
-      // ScreenX=200 -> World = Dist + 500 - 200 = Dist + 300. Correct.
-      const locoSlope = getSlope(locoWorldPos);
-      
-      drawRotated(LOCO_SCREEN_X, H - getTerrainY(locoWorldPos) - 15, Math.atan(locoSlope), () => {
+      // DRAW LOCO (Right side)
+      const locoSlope = getSlope(state.distance);
+      const locoY = H - getTerrainY(state.distance);
+
+      drawRotated(LOCO_SCREEN_X, locoY - 15, Math.atan(locoSlope), () => {
           // Wheels
-          ctx.fillStyle = '#dc2626'; // Red wheels
+          ctx.fillStyle = '#dc2626'; 
           const drawWheel = (wx: number, s: number) => {
              ctx.beginPath(); ctx.arc(wx, 10, s, 0, Math.PI*2); ctx.fill();
              ctx.strokeStyle = 'white'; ctx.lineWidth=2;
              ctx.beginPath(); 
-             const rot = state.distance * 0.1;
+             const rot = -state.distance * 0.1; // Negative for left move
              ctx.moveTo(wx + Math.cos(rot)*s, 10 + Math.sin(rot)*s);
              ctx.lineTo(wx - Math.cos(rot)*s, 10 - Math.sin(rot)*s);
              ctx.stroke();
           };
-          drawWheel(20, 14); // Big rear
-          drawWheel(-15, 10); // Small front
-          drawWheel(-40, 10);
+          
+          // Orientation: If "Backing", is the Cab on the Left or Right?
+          // Usually Loco pushes with flat side. 
+          // Let's draw it facing Left (Cowcatcher on Left).
+          
+          drawWheel(20, 14); // Rear (Right)
+          drawWheel(-15, 10); 
+          drawWheel(-40, 10); // Front (Left)
 
           // Body
-          ctx.fillStyle = '#dc2626'; // Red
+          ctx.fillStyle = '#dc2626'; 
           ctx.fillRect(-50, -45, 90, 45);
-          ctx.fillStyle = '#1e293b'; // Cab roof
-          ctx.fillRect(10, -55, 40, 10);
+          ctx.fillStyle = '#1e293b'; // Roof
+          ctx.fillRect(10, -55, 40, 10); // Cab at Rear (Right)
           // Chimney
           ctx.fillStyle = '#0f172a';
-          ctx.fillRect(-40, -60, 15, 15);
+          ctx.fillRect(-40, -60, 15, 15); // Front (Left)
           
-          // Pilot (Cowcatcher) - pointing Left
+          // Cowcatcher pointing Left
           ctx.beginPath();
           ctx.moveTo(-50, 0);
           ctx.lineTo(-65, 10);
@@ -441,23 +514,22 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
           if (state.throttle > 0 && Math.random() > 0.7) {
              state.particles.push({
                x: LOCO_SCREEN_X - 40,
-               y: H - getTerrainY(locoWorldPos) - 60,
-               vx: -state.speed - 2, // Blow back
+               y: locoY - 60,
+               vx: state.speed + 2, // Smoke blows Right as train moves Left
                vy: -2 - Math.random()*2,
                life: 50, color: 'rgba(255,255,255,0.4)', size: 5 + Math.random()*5
              });
           }
       });
 
-      // 4. PARTICLES
-      engine.current.particles.forEach((p, i) => {
-         p.x += p.vx + (state.speed * 0.5); // Move with world (parallax effect)
+      // Particles
+      engine.current.particles.forEach((p) => {
+         p.x += p.vx + (state.speed * 0.5); 
          p.y += p.vy;
          p.life--;
          ctx.fillStyle = p.color;
          ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
       });
-      // Remove dead
       engine.current.particles = engine.current.particles.filter(p => p.life > 0);
 
       rafId = requestAnimationFrame(loop);
@@ -471,38 +543,27 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
   if (phase === 'BUILD') {
     return (
       <div className="fixed inset-0 z-50 bg-slate-100 flex flex-col animate-fade-in">
-        {/* HEADER */}
         <div className="bg-blue-600 text-white p-4 shadow-lg flex justify-between items-center">
           <h2 className="text-xl md:text-3xl font-black uppercase tracking-wider">Bygg ditt godståg</h2>
           <button onClick={onComplete} className="text-blue-100 hover:text-white font-bold">AVBRYT</button>
         </div>
 
-        {/* TRAIN PREVIEW AREA */}
         <div className="flex-1 relative overflow-hidden flex items-center bg-sky-200">
-          {/* Background hints */}
           <div className="absolute bottom-0 w-full h-1/3 bg-[#e2e8f0] border-t-4 border-[#475569]"></div>
           
-          {/* CONDUCTOR BUBBLE (New) */}
           <div className="absolute top-4 md:top-10 left-4 md:left-1/2 md:-translate-x-1/2 z-40 animate-bounce-in">
               <div className="bg-white p-4 rounded-2xl shadow-xl border-b-8 border-slate-200 relative max-w-xs">
                   <div className="absolute -bottom-4 left-8 md:left-1/2 w-6 h-6 bg-white rotate-45 border-r-8 border-b-8 border-slate-200"></div>
                   <p className="font-bold text-slate-800 text-sm md:text-base uppercase">
-                     "Ditt lok orkar dra <span className="text-blue-600 text-xl">{MAX_SLOTS} vagnar</span> på den här banan. Välj noga!"
+                     "Jag orkar dra {MAX_SLOTS} vagnar! Ju fler du tar, desto mer <span className="text-yellow-600">guld</span> kan vi tjäna!"
                   </p>
               </div>
           </div>
 
+          {/* TRAIN PREVIEW (Reversed Order: Wagons -> Loco) */}
           <div className="flex items-end justify-center w-full max-w-6xl mx-auto px-4 relative z-10 mb-10 md:mb-20 gap-1">
              
-             {/* 1. LOKET */}
-             <div className="relative w-32 h-32 md:w-40 md:h-40 flex-shrink-0">
-                <div className="absolute bottom-2 right-0 w-full h-3/4 bg-red-600 rounded-l-xl shadow-xl border-4 border-red-800 z-20"></div>
-                <div className="absolute bottom-2 right-0 w-1/2 h-full bg-slate-800 rounded-t-lg z-10"></div>
-                <div className="absolute bottom-2 left-0 w-10 h-10 bg-slate-900 skew-x-12"></div> 
-                <div className="absolute bottom-8 left-4 text-4xl md:text-6xl z-30">👨‍✈️</div>
-             </div>
-
-             {/* 2. SLOTS */}
+             {/* 1. SLOTS (Left Side) */}
              {Array.from({length: MAX_SLOTS}).map((_, i) => {
                 const type = selectedWagons[i];
                 return (
@@ -520,17 +581,25 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
                        </div>
                      ) : (
                        <div className="w-full h-20 md:h-24 bg-black/10 border-4 border-dashed border-slate-400/50 rounded-xl flex items-center justify-center text-slate-400 font-bold text-xs md:text-sm uppercase">
-                          VAGN {i+1}
+                          PLATS {i+1}
                        </div>
                      )}
                      {/* Connector */}
-                     <div className="absolute left-[-6px] bottom-4 w-4 h-2 bg-slate-700"></div>
+                     <div className="absolute right-[-6px] bottom-4 w-4 h-2 bg-slate-700"></div>
                   </div>
                 );
              })}
+
+             {/* 2. LOKET (Right Side) */}
+             <div className="relative w-32 h-32 md:w-40 md:h-40 flex-shrink-0 transform scale-x-[-1]"> 
+                {/* Flipped visually to face Left, but placed on Right */}
+                <div className="absolute bottom-2 right-0 w-full h-3/4 bg-red-600 rounded-l-xl shadow-xl border-4 border-red-800 z-20"></div>
+                <div className="absolute bottom-2 right-0 w-1/2 h-full bg-slate-800 rounded-t-lg z-10"></div>
+                <div className="absolute bottom-2 left-0 w-10 h-10 bg-slate-900 skew-x-12"></div> 
+             </div>
              
              {/* START BUTTON */}
-             {selectedWagons.length === MAX_SLOTS && (
+             {selectedWagons.length > 0 && (
                 <div className="absolute -top-32 left-1/2 transform -translate-x-1/2 animate-bounce">
                    <button 
                      onClick={finalizeBuild}
@@ -543,9 +612,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
           </div>
         </div>
 
-        {/* COLLECTION DECK */}
         <div className="bg-white p-4 md:p-6 border-t-4 border-slate-300 shadow-up-lg">
-           <h3 className="text-center text-slate-400 font-bold uppercase text-sm mb-4 tracking-widest">VÄLJ VAGNAR FRÅN DIN SAMLING</h3>
            <div className="grid grid-cols-4 gap-2 md:gap-4 max-w-4xl mx-auto">
               {(Object.keys(WAGON_CONFIG) as WagonType[]).map(t => (
                 <button 
@@ -556,7 +623,6 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
                 >
                    <div className="text-4xl md:text-5xl mb-2 group-hover:scale-110 transition-transform">{WAGON_CONFIG[t].icon}</div>
                    <div className="font-black text-slate-700 text-xs md:text-sm uppercase">{WAGON_CONFIG[t].name}</div>
-                   <div className="text-[10px] md:text-xs text-slate-500 mt-1 leading-tight">{WAGON_CONFIG[t].desc}</div>
                    <span className="absolute top-2 right-2 text-[10px] font-bold bg-yellow-100 text-yellow-800 px-1 rounded">
                       {WAGON_CONFIG[t].effect}
                    </span>
@@ -588,35 +654,68 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
      );
   }
 
-  if (phase === 'SUMMARY') {
-     const score = cargoStatus.reduce((a,b) => a+b, 0) / cargoStatus.length;
-     const isGold = score > 80;
-     
+  if (phase === 'SUMMARY' && scoreResult) {
      return (
-        <div className="fixed inset-0 z-50 bg-green-500 flex items-center justify-center p-4 animate-fade-in">
-           <div className="bg-white rounded-3xl p-8 max-w-2xl w-full text-center shadow-2xl border-8 border-green-300 relative overflow-hidden">
+        <div className="fixed inset-0 z-50 bg-blue-500 flex items-center justify-center p-4 animate-fade-in">
+           <div className="bg-white rounded-3xl p-6 md:p-8 max-w-2xl w-full shadow-2xl border-8 border-blue-300 relative overflow-hidden">
               <div className="absolute inset-0 bg-yellow-50 -rotate-12 scale-150 -z-10"></div>
               
-              <div className="text-8xl mb-2 animate-bounce">{isGold ? '🏆' : '⭐'}</div>
-              <h2 className="text-4xl font-black text-slate-800 mb-2 uppercase">FRAMME!</h2>
-              <p className="text-slate-500 font-bold uppercase mb-6">Vilken resa!</p>
+              <h2 className="text-4xl font-black text-slate-800 mb-2 uppercase text-center">FRAMME!</h2>
+              
+              <div className="flex justify-center gap-2 mb-6">
+                 {[1,2,3].map(i => (
+                    <span key={i} className={`text-6xl transform transition-all duration-500 ${i <= scoreResult.stars ? 'scale-110 opacity-100' : 'scale-90 opacity-30 grayscale'}`}>
+                       ⭐
+                    </span>
+                 ))}
+              </div>
 
-              <div className="flex justify-center gap-4 mb-8">
-                 {selectedWagons.map((t, i) => (
-                    <div key={i} className="flex flex-col items-center">
-                       <div className="text-4xl mb-2">{WAGON_CONFIG[t].icon}</div>
-                       <div className="h-2 w-16 bg-slate-200 rounded-full overflow-hidden border border-slate-300">
-                          <div className={`h-full ${cargoStatus[i] > 50 ? 'bg-green-500' : 'bg-red-500'}`} style={{width: `${cargoStatus[i]}%`}}></div>
+              {/* SCORE BREAKDOWN */}
+              <div className="space-y-3 mb-8">
+                 <div className="flex justify-between items-center bg-slate-100 p-3 rounded-xl border-2 border-slate-200">
+                    <div className="flex items-center gap-3">
+                       <span className="text-2xl">💪</span>
+                       <div>
+                          <div className="font-black text-slate-700 uppercase text-sm">Modighetsbonus</div>
+                          <div className="text-xs text-slate-500">{scoreResult.wagonsCount} vagnar x 50</div>
                        </div>
                     </div>
-                 ))}
+                    <div className="font-black text-xl text-green-600">+{scoreResult.wagonPoints}</div>
+                 </div>
+
+                 <div className="flex justify-between items-center bg-slate-100 p-3 rounded-xl border-2 border-slate-200">
+                    <div className="flex items-center gap-3">
+                       <span className="text-2xl">📦</span>
+                       <div>
+                          <div className="font-black text-slate-700 uppercase text-sm">Lastbonus</div>
+                          <div className="text-xs text-slate-500">{Math.round(scoreResult.healthPercent * 100)}% helt</div>
+                       </div>
+                    </div>
+                    <div className="font-black text-xl text-green-600">+{scoreResult.cargoPoints}</div>
+                 </div>
+
+                 <div className="flex justify-between items-center bg-slate-100 p-3 rounded-xl border-2 border-slate-200">
+                    <div className="flex items-center gap-3">
+                       <span className="text-2xl">⚡</span>
+                       <div>
+                          <div className="font-black text-slate-700 uppercase text-sm">Tidsbonus</div>
+                          <div className="text-xs text-slate-500">Snabb leverans</div>
+                       </div>
+                    </div>
+                    <div className="font-black text-xl text-green-600">+{scoreResult.speedPoints}</div>
+                 </div>
+                 
+                 <div className="border-t-4 border-slate-200 pt-2 flex justify-between items-center px-2">
+                    <span className="font-black text-2xl text-slate-800 uppercase">TOTALT:</span>
+                    <span className="font-black text-4xl text-yellow-500 drop-shadow-sm">{scoreResult.total} 🪙</span>
+                 </div>
               </div>
 
               <button 
                 onClick={onComplete}
-                className="bg-yellow-400 hover:bg-yellow-500 text-yellow-900 text-2xl font-black py-4 px-12 rounded-full shadow-xl border-b-8 border-yellow-600 active:border-b-0 active:translate-y-2 transition-all uppercase w-full"
+                className="bg-green-500 hover:bg-green-600 text-white text-2xl font-black py-4 px-12 rounded-full shadow-xl border-b-8 border-green-700 active:border-b-0 active:translate-y-2 transition-all uppercase w-full"
               >
-                 HÄMTA BELÖNING
+                 TACK FÖR PENGARNA!
               </button>
            </div>
         </div>
@@ -650,7 +749,7 @@ export const TrainDeliveryGame: React.FC<TrainDeliveryGameProps> = ({ onComplete
       {showStartHint && (
          <div className="absolute bottom-40 right-6 animate-bounce pointer-events-none">
             <div className="bg-white text-blue-800 font-black px-4 py-2 rounded-xl shadow-xl border-4 border-blue-300 text-center uppercase">
-               Dra i spaken<br/>för att köra! 👇
+               Dra i spaken<br/>för att backa! 👇
             </div>
          </div>
       )}
