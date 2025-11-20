@@ -474,6 +474,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onUpdate
                    </div>
                 </div>
 
+                 {/* DEV / TEST SECTION */}
+                <div className="bg-slate-100 p-4 rounded-xl border-2 border-slate-200">
+                     <h3 className="font-bold text-slate-800 text-lg mb-2">UTVECKLARE / TEST</h3>
+                     <div className="space-y-2">
+                         <div>
+                             <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Vagnar som krävs för leveransspel</label>
+                             <div className="flex items-center gap-2">
+                                <input 
+                                    type="range" 
+                                    min="1" 
+                                    max="10" 
+                                    value={settings.deliveryTriggerCount || 5}
+                                    onChange={(e) => onUpdateSettings({...settings, deliveryTriggerCount: Number(e.target.value)})}
+                                    className="flex-1"
+                                />
+                                <span className="font-black text-xl text-slate-700 w-8 text-center">{settings.deliveryTriggerCount || 5}</span>
+                             </div>
+                             <p className="text-[9px] text-slate-400">Standard är 5. Sätt till 1 för att testa spelet direkt.</p>
+                         </div>
+                     </div>
+                </div>
+
                 {/* LOCAL KNOWLEDGE & STATS */}
                 <div className="bg-indigo-50 p-4 rounded-xl border-2 border-indigo-100">
                   <h3 className="font-bold text-slate-800 text-lg mb-2 border-b border-indigo-200 pb-2">DIN DATABAS (LOKALT)</h3>

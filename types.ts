@@ -65,6 +65,7 @@ export interface AppSettings {
   firebaseConfig?: FirebaseConfig; // For cloud sync
   enableBannedTopics: boolean; // Toggle for the ban list
   bannedTopics: string[]; // List of topics to exclude from AI generation
+  deliveryTriggerCount: number; // How many cars needed to trigger delivery game
 }
 
 export interface LevelStats {

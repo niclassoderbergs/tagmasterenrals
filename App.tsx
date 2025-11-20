@@ -53,7 +53,8 @@ const DEFAULT_SETTINGS: AppSettings = {
     "Hjärtat/Blod", 
     "Solen",
     "Fotosyntes"
-  ]
+  ],
+  deliveryTriggerCount: 5 // Default to 5 cars
 };
 
 const INITIAL_GAME_STATE: GameState = {
@@ -125,7 +126,8 @@ export default function App() {
         subjectDifficulty: { ...DEFAULT_SETTINGS.subjectDifficulty, ...parsed.subjectDifficulty },
         // Ensure new fields exist if loading old settings
         bannedTopics: parsed.bannedTopics || DEFAULT_SETTINGS.bannedTopics,
-        enableBannedTopics: parsed.enableBannedTopics ?? DEFAULT_SETTINGS.enableBannedTopics
+        enableBannedTopics: parsed.enableBannedTopics ?? DEFAULT_SETTINGS.enableBannedTopics,
+        deliveryTriggerCount: parsed.deliveryTriggerCount || DEFAULT_SETTINGS.deliveryTriggerCount
       };
     }
     return DEFAULT_SETTINGS;
@@ -541,11 +543,12 @@ export default function App() {
        setSelectedSubject(null);
        setQuestionBuffer([]); // Clear buffer to save memory
        
-       // Check if we have enough cars to trigger delivery mode?
-       // We only trigger if we have 5+ cars (excluding locomotive)
+       // Check if we have enough cars to trigger delivery mode
+       // We only trigger if we have N cars (excluding locomotive)
        const cargoCars = updatedCars.filter(c => c.type !== 'LOCOMOTIVE').length;
-       
-       if (cargoCars > 0 && cargoCars % 5 === 0) {
+       const triggerCount = settings.deliveryTriggerCount || 5; // Use setting or default
+
+       if (cargoCars > 0 && cargoCars % triggerCount === 0) {
            setTimeout(() => setShowDeliveryPrompt(true), 500);
        }
 
